@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="nn">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10131d" />
+    <meta
+      name="description"
+      content="Klipp – ei lokal arbeidsflate for å laste opp, redigere og eksportere video. Eit skuleprosjekt med ekte videobehandling."
+    />
+    <title>Klipp · Frå råmateriale til ferdig video</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#innhald">Hopp til innhaldet</a>
+    <svg
+      class="icon-library"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <symbol id="i-play" viewBox="0 0 24 24">
+        <path d="m9 5 11 7-11 7Z" />
+      </symbol>
+      <symbol id="i-home" viewBox="0 0 24 24">
+        <path d="m3 10 9-7 9 7v10H3Z M9 20v-7h6v7" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M3 6h7l2 3h9v11H3Z M3 9V4h7l2 2h9v3" />
+      </symbol>
+      <symbol id="i-calendar" viewBox="0 0 24 24">
+        <path d="M3 6h18v15H3Z M7 3v6 M17 3v6 M3 11h18 M7 15h3 M14 15h3" />
+      </symbol>
+      <symbol id="i-chart" viewBox="0 0 24 24">
+        <path d="M4 3v18h17 M8 17v-5 M13 17V7 M18 17V3" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14 M5 12h14" />
+      </symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24">
+        <path d="M12 16V3 M7 8l5-5 5 5 M4 14v7h16v-7" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 3v13 M7 11l5 5 5-5 M4 16v5h16v-5" />
+      </symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24">
+        <path d="M4 12h15 M13 6l6 6-6 6" />
+      </symbol>
+      <symbol id="i-film" viewBox="0 0 24 24">
+        <path
+          d="M3 4h18v16H3Z M7 4v16 M17 4v16 M3 8h4 M3 15h4 M17 8h4 M17 15h4"
+        />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M3 6h18 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7" />
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24">
+        <path d="M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6" />
+      </symbol>
+    </svg>
+
+    <aside class="sidebar" aria-label="Arbeidsområde">
+      <a class="brand" href="#heim" aria-label="Klipp – framside"
+        ><span class="brand-logo"
+          ><svg class="icon"><use href="#i-play" /></svg></span
+        >klipp<span class="brand-period">.</span></a
+      >
+      <p class="sidebar-label">ARBEIDSOMRÅDE</p>
+      <nav class="main-nav" aria-label="Hovudmeny">
+        <a href="#heim" data-route="heim"
+          ><svg class="icon"><use href="#i-home" /></svg
+          ><span>Framside</span></a
+        >
+        <a href="#prosjekt" data-route="prosjekt"
+          ><svg class="icon"><use href="#i-folder" /></svg
+          ><span>Mine prosjekt</span></a
+        >
+        <a href="#kalender" data-route="kalender"
+          ><svg class="icon"><use href="#i-calendar" /></svg
+          ><span>Publiseringsplanar</span></a
+        >
+        <a href="#abonnement" data-route="abonnement"
+          ><svg class="icon"><use href="#i-chart" /></svg
+          ><span>Abonnement og bruk</span></a
+        >
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-indicator"><span></span>Lokal demonstrasjon</div>
+        <p>Skuleprosjekt · VG2 IT<br />Ingen innlogging eller betaling.</p>
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <span class="topbar-title">VIDEOARBEIDSFLATE</span>
+        <div class="mode-badge"><span></span>Enkel redigering utan AI</div>
+      </header>
+      <div
+        id="notice"
+        class="global-notice"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
+      <main id="innhald" tabindex="-1">
+        <div id="app" aria-busy="true">
+          <p class="loading-state">Lastar arbeidsflata …</p>
+        </div>
+      </main>
+      <footer class="app-footer">
+        <span>Klipp · Eit skuleprosjekt under utvikling</span
+        ><span>Videoane dine blir behandla lokalt på denne maskina.</span>
+      </footer>
+    </div>
+    <noscript
+      ><p class="noscript">
+        Du må aktivere JavaScript for å bruke videoarbeidsflata.
+      </p></noscript
+    >
+  </body>
+</html>
