@@ -3,5 +3,6 @@ uvicorn==0.52.1
 python-multipart==0.0.32
 python-dotenv==1.2.2
 httpx==0.28.1
+google-genai==2.34.0
 # IANA-tidssoner på Windows (zoneinfo brukar systemdata på Linux).
 tzdata==2026.2

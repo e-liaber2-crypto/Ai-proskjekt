@@ -11,6 +11,7 @@ const state = {
   timer: null,
   project: null,
   uploading: false,
+  submitting: false,
   latest: null,
   completed: null,
 };
@@ -103,6 +104,19 @@ function badge(job) {
     statusNames[job?.status] || "Ikkje eksportert",
   );
 }
+// Jobbinnstillingane er fasiten, sjølv om brukaren seinare endrar skjemaet.
+// Eksportar frå før Gemini-støtta har ikkje eit mode-felt og er enkle eksportar.
+function jobMode(job) {
+  return (job?.settings?.mode || job?.mode) === "gemini" ? "gemini" : "basic";
+}
+function modeName(mode) {
+  return mode === "gemini"
+    ? "AI-redigering med Gemini"
+    : "Enkel redigering utan AI";
+}
+function modeBadge(job) {
+  return element("span", `badge job-mode ${jobMode(job)}`, modeName(jobMode(job)));
+}
 function loading() {
   app.innerHTML = '<p class="loading-state">Lastar …</p>';
   app.setAttribute("aria-busy", "true");
@@ -119,7 +133,7 @@ function home() {
     <section class="home-hero" aria-labelledby="home-title">
       <div><p class="eyebrow">FRÅ RÅMATERIALE TIL FERDIG VIDEO</p>
         <h1 id="home-title">Du har klippa.<br><span class="gradient-text">Skap samanhengen.</span></h1>
-        <p class="hero-description">Samle videoklippa dine, vel lengd og uttrykk, og set dei saman til éin video. Ei oversiktleg arbeidsflate frå første opplasting til ferdig eksport.</p>
+        <p class="hero-description">Samle videoklippa dine, vel lengd og uttrykk, og set dei saman til éin video. Vel enkel, lokal redigering eller la Gemini analysere materialet og foreslå ein klippeplan.</p>
         <div class="button-row"><a class="button" href="#prosjekt">${icons("plus")} Lag din første video</a><a class="button subtle" href="#slik-fungerer-det">Sjå arbeidsflyten ${icons("arrow")}</a></div>
         <p class="hero-note">${icons("check")} Lokal demonstrasjon. Ingen konto eller betaling nødvendig.</p>
       </div>
@@ -133,10 +147,10 @@ function home() {
     <section id="slik-fungerer-det" aria-labelledby="workflow-title"><div class="section-title"><h2 id="workflow-title">Ein enkel veg til ferdig video</h2><p>Mindre friksjon. Meir skaparglede.</p></div>
       <div class="feature-grid">
         <article class="feature"><div class="feature-icon">${icons("upload")}</div><h3>01 · Samle materialet</h3><p>Opprett eit prosjekt og last opp eitt eller fleire videoklipp. Prosjektet blir lagra medan du jobbar.</p></article>
-        <article class="feature"><div class="feature-icon">${icons("sliders")}</div><h3>02 · Finn uttrykket</h3><p>Vel lengd i minutt og sekund, biletformat, kantar eller beskjering og ein redigeringsstil.</p></article>
+        <article class="feature"><div class="feature-icon">${icons("sliders")}</div><h3>02 · Finn uttrykket</h3><p>Vel enkel modus eller Gemini, skriv ein instruksjon, og tilpass lengd, biletformat og redigeringsstil.</p></article>
         <article class="feature"><div class="feature-icon">${icons("download")}</div><h3>03 · Sjå og last ned</h3><p>Følg den faktiske videobehandlinga. Sjå resultatet her og last ned ei MP4-fil når ho er ferdig.</p></article>
       </div>
-      <div class="info-box home-limit"><strong>Kva fungerer i denne versjonen?</strong> Ekte klipping og samansetjing med FFmpeg, opptil 10 minutt per eksport. Enkel modus bruker starten av kvart klipp proporsjonalt i opplastingsrekkefølgje. AI-analyse og teksting er ikkje konfigurert. Planlegging lagrar berre lokale planar; automatisk publisering og betaling er ikkje aktive.</div>
+      <div class="info-box home-limit"><strong>To måtar å redigere på.</strong> Enkel modus klipper lokalt utan AI. Gemini er eit valfritt alternativ som krev ein API-nøkkel på serveren og nytt samtykke før kvar eksport: alle prosjektklippa og instruksjonen blir sende til Google, og bruken kan koste pengar eller bruke API-kvote. FFmpeg produserer videofila, opptil 10 minutt per eksport. Teksting er ikkje integrert. Publiseringsplanar er lokale, og betaling er ikkje aktiv.</div>
     </section>`;
 }
 
@@ -154,13 +168,16 @@ async function projects(token) {
   }
   for (const project of items) {
     const card = element("article", "project-card");
-    card.innerHTML = `<div class="project-visual">${icons("film")}<span class="status-slot"></span></div><div class="project-body"><h2></h2><p class="project-meta"></p><p class="project-meta project-date"></p><div class="button-row"><a class="button secondary small">Opne prosjekt ${icons("arrow")}</a><button class="button subtle small delete-project" type="button">${icons("trash")}<span class="sr-only">Slett</span></button></div><div class="delete-slot"></div></div>`;
+    card.innerHTML = `<div class="project-visual">${icons("film")}<span class="status-slot"></span></div><div class="project-body"><h2></h2><p class="project-meta"></p><p class="project-meta project-date"></p><p class="project-meta project-mode"></p><div class="button-row"><a class="button secondary small">Opne prosjekt ${icons("arrow")}</a><button class="button subtle small delete-project" type="button">${icons("trash")}<span class="sr-only">Slett</span></button></div><div class="delete-slot"></div></div>`;
     card.querySelector("h2").textContent = project.name;
     card.querySelector(".project-meta").textContent =
       `${project.clip_count || 0} klipp · ${duration(project.source_duration)} kjeldemateriale`;
     card.querySelector(".project-date").textContent =
       `Oppretta ${date(project.created_at)}`;
     card.querySelector(".status-slot").append(badge(project.latest_job));
+    card.querySelector(".project-mode").textContent = project.latest_job
+      ? `Siste jobb: ${modeName(jobMode(project.latest_job))}`
+      : "Ingen videojobb enno";
     card.querySelector("a").href = projectPath(project.id);
     card
       .querySelector(".delete-project")
@@ -221,18 +238,22 @@ async function editor(id, token) {
   if (token !== state.route) return;
   state.project = project;
   state.uploading = false;
+  state.submitting = false;
   state.latest = project.latest_job;
   state.completed =
     project.jobs?.find((job) => job.status === "completed") || null;
-  app.innerHTML = `<p class="breadcrumb"><a href="#prosjekt">Mine prosjekt</a><span>/</span>Arbeidsflate</p><div class="page-heading editor-heading"><div><p class="eyebrow">SKAP NOKO AV KLIPPA DINE</p><h1 id="editor-name"></h1><p class="description">Last opp, tilpass og eksporter. Du kan oppdatere sida utan å miste prosjektet eller jobbstatusen.</p></div><span class="pill">Enkel redigering utan AI</span></div>
+  app.innerHTML = `<p class="breadcrumb"><a href="#prosjekt">Mine prosjekt</a><span>/</span>Arbeidsflate</p><div class="page-heading editor-heading"><div><p class="eyebrow">SKAP NOKO AV KLIPPA DINE</p><h1 id="editor-name"></h1><p class="description">Last opp, vel redigeringsmodus og eksporter. Prosjektet og den faktiske jobbstatusen er lagra når du oppdaterer sida.</p></div><span class="pill">Lokal app · Gemini som val</span></div>
     <div class="editor-layout"><div class="stack">
       <section class="panel" aria-labelledby="upload-heading"><div class="panel-header"><div class="panel-heading"><span class="section-number">01</span><h2 id="upload-heading">Videoklippa dine</h2></div><span id="clip-count" class="muted small"></span></div><div class="panel-body">
         <label class="upload-zone" id="drop-zone">${icons("upload")}<span class="upload-title">Vel videoklipp eller dra dei hit</span><span class="field-hint">MP4, MOV, MKV eller WebM · maks 200 MiB per fil<br>Opptil 12 klipp · maks 30 minutt per kjeldeklipp</span><input id="clip-upload" type="file" accept=".mp4,.mov,.mkv,.webm" multiple aria-label="Last opp videoklipp" data-lock></label>
         <p id="upload-message" class="upload-message" role="status" aria-live="polite"></p><div id="clip-list" class="clip-list"></div><div class="source-summary"><span id="source-duration"></span><strong id="source-storage"></strong></div><p id="upload-error" class="error-inline" role="alert"></p>
       </div></section>
       <section class="panel" aria-labelledby="settings-heading"><div class="panel-header"><div class="panel-heading"><span class="section-number">02</span><h2 id="settings-heading">Gje videoen ei retning</h2></div>${icons("sliders")}</div><div class="panel-body">
-        <div class="info-box settings-note"><strong>Enkel modus, utan AI.</strong> Vi bruker starten av kvart klipp proporsjonalt, i opplastingsrekkefølgje. Roleg og profesjonell stil gir mjuke inn- og uttoningar; energisk stil bruker direkte klipp.</div>
-        <form id="settings-form"><div class="field"><label for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" data-lock></textarea><span class="field-hint">Instruksjonen blir lagra med eksporten. Enkel modus tolkar ikkje teksten og vel ikkje motiv med AI.</span></div>
+        <form id="settings-form">
+        <div class="field"><label for="edit-mode">Redigeringsmodus</label><select id="edit-mode" name="mode" aria-describedby="mode-note" data-lock><option value="basic">Enkel redigering utan AI</option><option value="gemini">AI-redigering med Gemini</option></select><span id="mode-note" class="field-hint"></span></div>
+        <div id="basic-mode-info" class="info-box settings-note"><strong>Enkel modus, utan AI.</strong> Vi bruker starten av kvart klipp proporsjonalt, i opplastingsrekkefølgje. Roleg og profesjonell stil gir mjuke inn- og uttoningar; energisk stil bruker direkte klipp. Ingen videofiler blir sende til ei AI-teneste.</div>
+        <div id="gemini-mode-info" class="gemini-settings" hidden><div class="info-box warning settings-note"><strong>Alle klippa i prosjektet blir sende til Google.</strong> Gemini analyserer sjølve videoane og tekstinstruksjonen for å foreslå utdrag og rekkjefølgje. Dette kan koste pengar eller bruke API-kvote. Klippeplanen blir kontrollert før FFmpeg lagar videofila lokalt. Resultatet kan avvike frå ønsket ditt, og du må sjå gjennom det.</div><p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p><label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til at alle videoklippa i dette prosjektet og instruksjonen blir sende til Google for denne AI-eksporten, og forstår at det kan bruke kvote eller koste pengar.</span></label></div>
+        <div class="field"><label id="description-label" for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" aria-describedby="description-hint" data-lock></textarea><span id="description-hint" class="field-hint"></span></div>
         <div class="field"><label id="duration-label">Ønskt lengd</label><div class="duration-fields" role="group" aria-labelledby="duration-label"><label for="duration-minutes">Minutt<input id="duration-minutes" type="number" min="0" max="10" step="1" value="0" required data-lock></label><label for="duration-seconds">Sekund<input id="duration-seconds" type="number" min="0" max="59" step="1" value="30" required data-lock></label></div><span class="field-hint">Frå 1 sekund til 10 minutt. Videoen kan ikkje bli lengre enn kjeldematerialet.</span></div>
         <div id="duration-warning" class="info-box warning duration-warning" role="status" hidden></div>
         <div class="form-grid"><div class="field"><label for="aspect">Biletformat</label><select id="aspect" data-lock><option value="16:9">Liggjande · 16:9</option><option value="9:16">Ståande · 9:16</option><option value="1:1">Kvadratisk · 1:1</option></select></div><div class="field"><label for="fit">Tilpassing av biletet</label><select id="fit" data-lock><option value="pad">Bevar heile biletet med kantar</option><option value="crop">Beskjer for å fylle formatet</option></select></div><div class="field full"><label for="style">Redigeringsstil</label><select id="style" data-lock><option value="calm">Roleg · mjuke toningar</option><option value="energetic">Energisk · direkte klipp</option><option value="professional">Profesjonell · korte toningar</option></select></div></div>
@@ -251,6 +272,13 @@ async function editor(id, token) {
   byId("aspect").value = settings.aspect || "16:9";
   byId("fit").value = settings.fit || "pad";
   byId("style").value = settings.style || "professional";
+  byId("edit-mode").value = settings.mode === "gemini" ? "gemini" : "basic";
+  // Gamalt samtykke frå ei lagra jobb er aldri samtykke til ein ny eksport.
+  byId("ai-consent").checked = false;
+  byId("edit-mode").addEventListener("change", () => {
+    byId("ai-consent").checked = false;
+    updateControls();
+  });
   refreshClips();
   updateJob();
   updateResult();
@@ -272,7 +300,7 @@ async function editor(id, token) {
   );
   dropZone.addEventListener("drop", (event) => {
     event.preventDefault();
-    if (!state.uploading && !active(state.latest))
+    if (!state.uploading && !state.submitting && !active(state.latest))
       uploadFiles([...event.dataTransfer.files], token);
   });
   byId("settings-form").addEventListener("input", updateControls);
@@ -286,9 +314,20 @@ async function editor(id, token) {
       fit: byId("fit").value,
       style: byId("style").value,
       subtitles: false,
+      mode: byId("edit-mode").value,
+      ai_consent:
+        byId("edit-mode").value === "gemini" && byId("ai-consent").checked,
     };
-    if (state.uploading || active(state.latest)) return;
-    byId("render-button").disabled = true;
+    if (state.uploading || state.submitting || active(state.latest)) return;
+    const modeError = editingModeError();
+    if (modeError) {
+      inlineError("render-error", modeError);
+      return;
+    }
+    // Samtykket gjeld berre denne førespurnaden, også om ho feilar.
+    byId("ai-consent").checked = false;
+    state.submitting = true;
+    updateControls();
     try {
       const job = await api(`/projects/${encodeURIComponent(id)}/jobs`, {
         method: "POST",
@@ -303,8 +342,13 @@ async function editor(id, token) {
       beginPolling(token);
       byId("job-status").scrollIntoView({ behavior: "auto", block: "nearest" });
     } catch (error) {
+      if (token !== state.route) return;
       inlineError("render-error", error.message);
-      updateControls();
+    } finally {
+      if (token === state.route) {
+        state.submitting = false;
+        updateControls();
+      }
     }
   });
   updateControls();
@@ -317,15 +361,57 @@ function requestedDuration() {
     Number(byId("duration-seconds")?.value || 0)
   );
 }
+function editingModeError() {
+  if (byId("edit-mode")?.value !== "gemini") return "";
+  if (!state.config?.ai_available)
+    return "Gemini er ikkje konfigurert på serveren. Sjå README for oppsett, eller vel enkel redigering utan AI. Ingen AI-førespurnad er send.";
+  const maxFiles = state.config?.limits?.max_ai_files || 10;
+  if (state.project.clips.length > maxFiles)
+    return `Denne appen tillèt opptil ${maxFiles} klipp per AI-jobb. Alle ${state.project.clips.length} prosjektklippa ville blitt sende. Fjern nokre klipp eller vel enkel modus.`;
+  const maxSource = state.config?.limits?.max_ai_source_seconds || 1800;
+  if (state.project.source_duration > maxSource)
+    return `AI-modusen i denne appen tillèt opptil ${duration(maxSource)} kjeldemateriale totalt, men prosjektet har ${duration(state.project.source_duration)}. Fjern nokre klipp eller vel enkel modus.`;
+  if (!byId("description").value.trim())
+    return "Skriv ein instruksjon som fortel Gemini kva du vil lage.";
+  if (!byId("ai-consent").checked)
+    return "Kryss av for samtykke til denne AI-eksporten før du startar.";
+  return "";
+}
+function updateEditingMode(locked) {
+  const gemini = byId("edit-mode").value === "gemini";
+  const maxFiles = state.config?.limits?.max_ai_files || 10;
+  const maxSource = state.config?.limits?.max_ai_source_seconds || 1800;
+  byId("basic-mode-info").hidden = gemini;
+  byId("gemini-mode-info").hidden = !gemini;
+  byId("mode-note").textContent = gemini
+    ? "Gemini analyserer video og instruksjon. Valet krev oppsett på serveren og nytt samtykke for kvar eksport."
+    : `Lokal klipping og samansetjing, utan AI. Opptil ${state.config?.limits?.max_files || 12} videoklipp per prosjekt.`;
+  byId("gemini-availability").textContent = state.config?.ai_available
+    ? `API-nøkkel er konfigurert på serveren. Modell: ${state.config.gemini_model || "vald på serveren"}. Dette stadfestar ikkje at API-tilgangen eller kvoten er testa.`
+    : "Gemini er ikkje konfigurert: API-nøkkel manglar på serveren. Sjå README for oppsett og start serveren på nytt. Ingen AI-førespurnad blir send frå dette skjemaet utan oppsett.";
+  byId("gemini-file-limit").textContent =
+    `Appen si AI-grense er ${maxFiles} videofiler og ${duration(maxSource)} kjeldemateriale totalt per jobb. Dette er ressursgrenser i denne appen, ikkje Google-kvoten. Alle prosjektklippa blir analyserte. Enkel modus støttar framleis opptil ${state.config?.limits?.max_files || 12} filer.`;
+  byId("gemini-validation").textContent = locked ? "" : editingModeError();
+  byId("ai-consent").required = gemini;
+  byId("ai-consent").disabled = locked || !gemini || !state.config?.ai_available;
+  byId("description").required = gemini;
+  byId("description-label").textContent = gemini
+    ? "Kva skal Gemini lage? (påkravd)"
+    : "Kva vil du lage?";
+  byId("description-hint").textContent = gemini
+    ? "Skildre kva som er relevant i materialet, ønskte utdrag, rekkjefølgje og uttrykk. Instruksjonen blir send til Google saman med alle prosjektklippa."
+    : "Instruksjonen blir lagra med eksporten. Enkel modus tolkar ikkje teksten og vel ikkje motiv med AI.";
+}
 function updateControls() {
   if (!byId("settings-form")) return;
-  const locked = state.uploading || active(state.latest);
+  const locked = state.uploading || state.submitting || active(state.latest);
   document.querySelectorAll("[data-lock]").forEach((input) => {
     input.disabled = locked;
   });
   document.querySelectorAll(".delete-clip").forEach((button) => {
     button.disabled = locked;
   });
+  updateEditingMode(locked);
   const requested = requestedDuration();
   const source = Number(state.project.source_duration) || 0;
   const max = state.config?.limits?.max_export_seconds || 600;
@@ -343,6 +429,7 @@ function updateControls() {
     locked ||
     !state.project.clips.length ||
     Boolean(message) ||
+    Boolean(editingModeError()) ||
     !state.config?.ffmpeg_available;
   if (!state.config?.ffmpeg_available)
     inlineError(
@@ -394,7 +481,7 @@ async function reloadProject() {
   if (state.project?.id === id) state.project = project;
 }
 async function uploadFiles(files, token) {
-  if (!files.length || state.uploading || active(state.latest)) return;
+  if (!files.length || state.uploading || state.submitting || active(state.latest)) return;
   state.uploading = true;
   inlineError("upload-error", "");
   updateControls();
@@ -447,6 +534,7 @@ function updateJob() {
   const header = element("div", "job-heading");
   header.append(element("strong", "", "Siste videojobb"), badge(job));
   box.append(header);
+  box.append(modeBadge(job));
   if (active(job)) {
     const progress = document.createElement("progress");
     progress.max = 100;
@@ -502,7 +590,12 @@ function updateResult() {
   download.innerHTML = `${icons("download")} Last ned MP4`;
   download.href = `/api/jobs/${encodeURIComponent(job.id)}/download`;
   download.setAttribute("download", "");
-  slot.append(video, metadata, download);
+  const resultMode = element(
+    "p",
+    "result-mode",
+    `Siste fullførte eksport · ${modeName(jobMode(job))}`,
+  );
+  slot.append(resultMode, video, metadata, download);
   scheduleForm(job);
 }
 function updateHistory() {
@@ -524,6 +617,7 @@ function updateHistory() {
         date(job.created_at, { hour: "2-digit", minute: "2-digit" }),
       ),
       badge(job),
+      modeBadge(job),
     );
     if (job.status === "completed") {
       const link = element("a", "", "Last ned");

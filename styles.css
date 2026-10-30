@@ -1271,6 +1271,52 @@ main {
   margin-bottom: 20px;
 }
 
+.gemini-settings {
+  padding: 16px;
+  margin-bottom: 20px;
+  border: 1px solid #5a4c83;
+  border-radius: 10px;
+  background: #211e35;
+}
+
+.gemini-settings .settings-note {
+  margin-bottom: 12px;
+}
+
+.gemini-settings > .field-hint + .field-hint {
+  margin-top: 8px;
+}
+
+.ai-consent-field {
+  margin-block: 17px 0;
+  color: #e5def8;
+}
+
+.job-mode {
+  margin-bottom: 10px;
+  white-space: normal;
+}
+
+.job-mode.gemini {
+  color: #d3c3ff;
+  background: #33294c;
+  border-color: #645184;
+}
+
+.result-mode {
+  margin-bottom: 12px;
+  color: #c5cde4;
+  font-size: 0.73rem;
+}
+
+.history-row {
+  flex-wrap: wrap;
+}
+
+.history-row .job-mode {
+  margin-bottom: 0;
+}
+
 .duration-warning {
   margin-bottom: 17px;
 }

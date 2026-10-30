@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import media
+from . import gemini, media
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
@@ -40,7 +40,7 @@ MAX_EXPORT_SECONDS = 600
 ACTIVE = ("queued", "processing")
 EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 MIME_TYPES = {"video/mp4", "video/quicktime", "video/x-matroska", "video/webm", "application/octet-stream"}
-DEFAULT_SETTINGS = {"duration_seconds": 30, "aspect": "16:9", "fit": "pad", "style": "professional", "subtitles": False}
+DEFAULT_SETTINGS = {"duration_seconds": 30, "aspect": "16:9", "fit": "pad", "style": "professional", "subtitles": False, "mode": "basic", "ai_consent": False}
 
 
 def now() -> str:
@@ -68,6 +68,8 @@ class EditInput(BaseModel):
     fit: Literal["pad", "crop"] = "pad"
     style: Literal["calm", "energetic", "professional"] = "professional"
     subtitles: bool = False
+    mode: Literal["basic", "gemini"] = "basic"
+    ai_consent: bool = Field(default=False, strict=True)
 
 
 class ScheduleInput(BaseModel):
@@ -144,7 +146,15 @@ class Store:
                     created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'planned_local',
                     UNIQUE(job_id, channel, scheduled_at)
                 );
+                CREATE TABLE IF NOT EXISTS gemini_files (
+                    file_name TEXT PRIMARY KEY,
+                    job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL
+                );
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "plan" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN plan TEXT")
 
     @contextmanager
     def connect(self):
@@ -211,6 +221,7 @@ class Store:
         jobs = self.all("SELECT * FROM jobs WHERE project_id=? ORDER BY created_at DESC", (project_id,))
         for job in jobs:
             job["settings"] = json.loads(job["settings"])
+            job["plan"] = json.loads(job["plan"]) if job["plan"] else None
         result.update(source_duration=sum(c["duration"] for c in clips), clip_count=len(clips),
                       storage_bytes=sum(c["size_bytes"] for c in clips) + sum(j["output_bytes"] for j in jobs),
                       latest_job=jobs[0] if jobs else None)
@@ -247,6 +258,8 @@ class VideoWorker:
         self.thread.join()  # Pågåande FFmpeg-steg har eigen tidsgrense.
 
     def run(self):
+        # Køyr nettverksopprydding i arbeidstråden, aldri i HTTP-oppstarten.
+        self.cleanup_pending()
         while not self.stopping.is_set():
             with self.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -259,6 +272,15 @@ class VideoWorker:
                 self.wakeup.wait(1)
                 self.wakeup.clear()
 
+    def cleanup_pending(self):
+        names = [row["file_name"] for row in self.store.all("SELECT file_name FROM gemini_files")]
+        if not names:
+            return True
+        remaining = gemini.cleanup_files(names, lambda name: self.store.execute("DELETE FROM gemini_files WHERE file_name=?", (name,)))
+        if remaining:
+            LOGGER.warning("Opprydding av %s mellombelse Google-filer står att. Ingen analyse vart starta av oppryddinga.", len(remaining))
+        return not remaining
+
     def process(self, job):
         output_dir = self.store.directory / "outputs" / job["id"]
         output_dir.mkdir(exist_ok=True)
@@ -266,13 +288,39 @@ class VideoWorker:
         try:
             settings = json.loads(job["settings"])
             clips = self.store.source_clips(job["project_id"])
-            plan = media.build_plan(clips, settings["duration_seconds"], settings["style"])
-            media.validate_plan(plan, clips, settings["duration_seconds"])
-
             def progress(percent, stage):
                 self.store.execute("UPDATE jobs SET progress=?,stage=? WHERE id=?", (min(99, max(2, int(percent))), stage, job["id"]))
 
-            result = media.render(plan, output, settings["aspect"], settings["fit"], settings["style"], progress)
+            ai_mode = settings.get("mode", "basic") == "gemini"
+            if ai_mode:
+                if not settings.get("ai_consent"):
+                    raise gemini.GeminiError("AI-jobben manglar samtykke til å sende klippa til Google.", "consent")
+                progress(2, "Ryddar eventuelle tidlegare Google-filer")
+                if not self.cleanup_pending():
+                    raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast. Kontroller nøkkel og nettverk, og start serveren på nytt før ny AI-analyse.", "cleanup")
+
+                def remember_file(name):
+                    self.store.execute("INSERT OR IGNORE INTO gemini_files(file_name,job_id,created_at) VALUES(?,?,?)", (name, job["id"], now()))
+
+                def forget_file(name):
+                    self.store.execute("DELETE FROM gemini_files WHERE file_name=?", (name,))
+
+                plan = gemini.generate_plan(
+                    clips, settings["description"], settings["duration_seconds"], settings["style"], progress,
+                    on_uploaded=remember_file, on_deleted=forget_file, model=settings.get("gemini_model"),
+                )
+            else:
+                plan = media.build_plan(clips, settings["duration_seconds"], settings["style"])
+            media.validate_plan(plan, clips, settings["duration_seconds"])
+            public_plan = [{"clip_id": part["clip_id"], "start_seconds": part["start"],
+                            "end_seconds": part["start"] + part["duration"], "order": index + 1}
+                           for index, part in enumerate(plan)]
+            self.store.execute("UPDATE jobs SET plan=? WHERE id=?", (json.dumps(public_plan), job["id"]))
+
+            def render_progress(percent, stage):
+                progress(45 + int(percent * 0.54) if ai_mode else percent, stage)
+
+            result = media.render(plan, output, settings["aspect"], settings["fit"], settings["style"], render_progress)
             size = output.stat().st_size
             if self.store.usage()["storage_bytes"] + size > MAX_STORAGE:
                 raise media.MediaError("Lagringsgrensa på 2 GiB er nådd. Slett eit prosjekt og prøv igjen.")
@@ -282,7 +330,11 @@ class VideoWorker:
         except Exception as error:
             shutil.rmtree(output_dir, ignore_errors=True)
             message = str(error) if isinstance(error, media.MediaError) else "Videobehandlinga feila. Kontroller serverloggen og prøv igjen."
-            LOGGER.exception("Videobehandling feila for jobb %s", job["id"])
+            if isinstance(error, gemini.GeminiError):
+                # Ikkje logg SDK-unntak, HTTP-svar, instruksjonar eller nøkkelverdiar.
+                LOGGER.warning("Gemini-jobb %s feila (%s)", job["id"], error.code)
+            else:
+                LOGGER.exception("Videobehandling feila for jobb %s", job["id"])
             self.store.execute("UPDATE jobs SET status='failed',stage='Behandlinga feila',error=?,finished_at=? WHERE id=?",
                                (message, now(), job["id"]))
 
@@ -322,10 +374,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @application.get("/api/config")
     def config():
-        return {"mode": "basic", "local_demo": True, "ai_available": False, "transcription_available": False,
+        return {"mode": "basic", "local_demo": True, "ai_available": gemini.configured(),
+                "gemini_model": gemini.model_name(), "transcription_available": False,
                 "ffmpeg_available": media.tools_available(), "timezone": "Europe/Oslo",
                 "limits": {"max_upload_mb": 200, "max_files": MAX_FILES, "max_clip_seconds": MAX_CLIP_SECONDS,
-                           "max_export_seconds": MAX_EXPORT_SECONDS, "max_storage_mb": 2048}}
+                           "max_export_seconds": MAX_EXPORT_SECONDS, "max_storage_mb": 2048,
+                           "max_ai_files": gemini.MAX_AI_FILES, "max_ai_source_seconds": gemini.MAX_AI_SOURCE_SECONDS}}
 
     @application.get("/api/projects")
     def projects():
@@ -436,6 +490,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if store.committed_storage() + reservation > MAX_STORAGE:
                 raise HTTPException(413, "Det er ikkje nok ledig lagringsplass til eksporten. Slett eit prosjekt først.")
             clips = store.source_clips(project_id)
+            if body.mode == "gemini":
+                if not body.ai_consent:
+                    raise HTTPException(400, "Du må samtykkje til at klippa og instruksjonen blir sende til Google for AI-analyse.")
+                if not body.description.strip():
+                    raise HTTPException(400, "Skriv kva du ønskjer at Gemini skal lage.")
+                if not gemini.configured():
+                    raise HTTPException(503, "GEMINI_API_KEY manglar i servermiljøet. Set nøkkelen lokalt og start serveren på nytt, eller vel enkel redigering.")
+                if len(clips) > gemini.MAX_AI_FILES or sum(clip["duration"] for clip in clips) > gemini.MAX_AI_SOURCE_SECONDS:
+                    raise HTTPException(400, "AI-modus støttar høgst ti klipp og 30 minutt samla kjeldemateriale per jobb.")
             try:
                 plan = media.build_plan(clips, body.duration_seconds, body.style)
                 media.validate_plan(plan, clips, body.duration_seconds)
@@ -443,10 +506,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 raise HTTPException(400, str(error)) from error
             identifier = uuid4().hex
             settings = body.model_dump(exclude={"description"})
+            job_settings = {**settings, "description": body.description}
+            if body.mode == "gemini":
+                job_settings["gemini_model"] = gemini.model_name()
             with store.connect() as db:
                 db.execute("UPDATE projects SET description=?,settings=? WHERE id=?", (body.description, json.dumps(settings), project_id))
                 db.execute("INSERT INTO jobs(id,project_id,status,stage,settings,created_at) VALUES(?,?,'queued','Ventande i kø',?,?)",
-                           (identifier, project_id, json.dumps(settings), now()))
+                           (identifier, project_id, json.dumps(job_settings), now()))
             worker.wakeup.set()
             return get_job(identifier)
 
@@ -456,6 +522,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not job:
             raise HTTPException(404, "Jobben finst ikkje.")
         job["settings"] = json.loads(job["settings"])
+        job["plan"] = json.loads(job["plan"]) if job["plan"] else None
         return job
 
     def result_file(job_id: str, download: bool):
