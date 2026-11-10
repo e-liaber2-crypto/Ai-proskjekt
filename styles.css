@@ -1,3 +1,4 @@
+
 /* Felles designvariablar. Endre desse for å tilpasse fargar og uttrykk. */
 :root {
   color-scheme: dark;
@@ -2138,4 +2139,27 @@ main {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+.ranking-summary, .narration-script {
+  margin-top: 20px;
+  padding: 18px;
+  border: 1px solid #393654;
+  border-radius: 14px;
+  background: #191d2d;
+  overflow-wrap: anywhere;
+}
+.ranking-summary h3 { margin: 0 0 12px; }
+.ranking-summary p, .narration-script p { margin: 8px 0; line-height: 1.6; }
+.ranking-list { list-style: none; padding: 0; margin: 16px 0 0; }
+.ranking-item { padding: 14px 0; border-top: 1px solid #393654; }
+.ranking-item strong { color: #d9d1ff; }
+.narration-script summary { cursor: pointer; color: #d9d1ff; }
+.result-status-notice {
+  padding: 14px 16px;
+  border: 1px solid #85672b;
+  border-radius: 10px;
+  background: #352d1d;
+  color: #ffe0a0;
+  line-height: 1.6;
 }

@@ -17,9 +17,11 @@ import sqlite3
 import subprocess
 import time
 import unittest
+import wave
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from google.genai import errors
 
 from app import gemini, media
 from app.main import create_app
@@ -43,8 +45,14 @@ class FakeFiles:
         self.initial_state = "ACTIVE"
         self.polled_state = "ACTIVE"
         self.files = {}
+        self.list_error = None
 
-    def file(self, name, state):
+    def list(self, *, config=None):
+        if self.list_error:
+            raise self.list_error
+        return iter(self.files.values())
+
+    def file(self, name, state="ACTIVE"):
         return SimpleNamespace(
             name=name,
             uri="https://generativelanguage.googleapis.com/v1beta/" + name,
@@ -121,7 +129,8 @@ class NoNetworkCase(unittest.TestCase):
         patch.dict(os.environ, {"GEMINI_API_KEY": TEST_KEY, "GOOGLE_API_KEY": "", "GEMINI_MODEL": "gemini-test-model"}).start()
         self.client_constructor = patch("app.gemini.genai.Client", return_value=self.fake).start()
         # Også ein utilsikta kodeveg skal feile, framfor å nå Google.
-        patch("socket.socket.connect", side_effect=AssertionError("Nettverk er forbode i Gemini-testane.")).start()
+        patch("httpx.HTTPTransport.handle_request", side_effect=AssertionError("Eksternt HTTP-nettverk er forbode i Gemini-testane.")).start()
+        patch("httpx.AsyncHTTPTransport.handle_async_request", side_effect=AssertionError("Eksternt HTTP-nettverk er forbode i Gemini-testane.")).start()
         patch("app.gemini.POLL_INTERVAL_SECONDS", 0).start()
         self.clips = []
         for identifier in ("clip-a", "clip-b"):
@@ -167,6 +176,16 @@ class NoNetworkCase(unittest.TestCase):
 
 
 class GeminiPlanTests(NoNetworkCase):
+    def test_invalid_key_is_rejected_locally_without_exposing_value(self):
+        for key in ("private-nøkkel", "private key", "private\nkey", "private\x7fkey"):
+            with self.subTest(key_kind="invalid"), patch.dict(os.environ, {"GEMINI_API_KEY": key}):
+                self.assertFalse(gemini.configured())
+                with self.assertRaises(gemini.GeminiError) as raised:
+                    gemini._client()
+                self.assertEqual(raised.exception.code, "invalid_key")
+                self.assertNotIn(key, str(raised.exception))
+        self.client_constructor.assert_not_called()
+
     def test_configuration_checks_presence_without_making_requests(self):
         self.assertTrue(gemini.configured())
         self.assertEqual(gemini.model_name(), "gemini-test-model")
@@ -269,7 +288,7 @@ class GeminiSdkTests(NoNetworkCase):
         self.assertTrue(config.response_json_schema)
 
     def test_rate_limit_does_not_retry_generation_and_sanitizes_provider_details(self):
-        self.fake.models.error = gemini.errors.ClientError(429, {"error": {
+        self.fake.models.error = errors.ClientError(429, {"error": {
             "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "RESOURCE_EXHAUSTED",
         }})
         self.assert_sanitized_failure()
@@ -277,6 +296,62 @@ class GeminiSdkTests(NoNetworkCase):
         self.assertEqual(len(self.fake.files.uploads), 1)
         self.assertEqual(len(self.fake.files.deletes), 1)
         self.assertFalse(self.pending)
+
+    def assert_generation_server_error(self, status):
+        self.fake.models.error = errors.ServerError(status, {"error": {
+            "message": PROVIDER_PRIVATE_TEXT + TEST_KEY,
+            "status": "INTERNAL" if status == 500 else "UNAVAILABLE",
+        }})
+        failure = self.assert_sanitized_failure()
+        self.assertEqual(failure.code, "unavailable")
+        self.assertEqual(failure.http_status, status)
+        self.assertEqual(failure.operation, "analysis")
+        self.assertIn(str(status), str(failure))
+        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertEqual(len(self.fake.files.uploads), 1)
+        self.assertEqual(len(self.fake.files.deletes), 1)
+        self.assertFalse(self.pending)
+        self.assertTrue(self.fake.closed)
+        return str(failure)
+
+    def test_generation_500_reports_internal_error_without_retry_or_private_details(self):
+        message = self.assert_generation_server_error(500)
+        self.assertIn("intern", message.lower())
+
+    def test_generation_503_reports_overload_without_retry_or_private_details(self):
+        message = self.assert_generation_server_error(503)
+        self.assertIn("overbelasta", message.lower())
+
+    def test_provider_metadata_is_limited_to_http_codes_and_known_operations(self):
+        private = PROVIDER_PRIVATE_TEXT + TEST_KEY
+        for code in ("503", 503.0, True, -1, 99, 600, None, 503):
+            with self.subTest(code=code):
+                error = RuntimeError(private)
+                error.code = code
+                failure = gemini._safe_error(error, operation=private)
+                self.assertEqual(failure.http_status, 503 if type(code) is int and code == 503 else None)
+                self.assertIsNone(failure.operation)
+                self.assertNotIn(PROVIDER_PRIVATE_TEXT, str(failure))
+                self.assertNotIn(TEST_KEY, str(failure))
+                self.assertNotIn(private, json.dumps(vars(failure)))
+
+    def test_cleanup_failure_preserves_original_analysis_error_metadata(self):
+        self.fake.models.error = errors.ServerError(503, {"error": {
+            "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "UNAVAILABLE",
+        }})
+        self.fake.files.delete_error = errors.ClientError(403, {"error": {
+            "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "PERMISSION_DENIED",
+        }})
+        failure = self.assert_sanitized_failure()
+        self.assertEqual(failure.code, "cleanup")
+        self.assertEqual(failure.http_status, 503)
+        self.assertEqual(failure.operation, "analysis")
+        self.assertIn("503", str(failure))
+        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertEqual(len(self.fake.files.uploads), 1)
+        self.assertEqual(len(self.fake.files.deletes), 1)
+        self.assertTrue(self.pending)
+        self.assertTrue(self.fake.closed)
 
     def test_timeout_does_not_retry_generation_and_cleans_files(self):
         self.fake.models.error = TimeoutError(PROVIDER_PRIVATE_TEXT + TEST_KEY)
@@ -320,7 +395,7 @@ class GeminiSdkTests(NoNetworkCase):
         self.assertFalse(self.pending)
 
     def test_delete_can_retry_transient_errors_without_repeating_generation(self):
-        self.fake.files.delete_errors = [gemini.errors.ServerError(503, {"error": {"message": PROVIDER_PRIVATE_TEXT}})]
+        self.fake.files.delete_errors = [errors.ServerError(503, {"error": {"message": PROVIDER_PRIVATE_TEXT}})]
         plan = self.generate(clips=self.clips[:1])
         self.assertEqual(len(plan), 1)
         self.assertEqual(len(self.fake.files.deletes), 2)
@@ -329,20 +404,62 @@ class GeminiSdkTests(NoNetworkCase):
         self.assertFalse(self.pending)
 
     def test_unresolved_remote_cleanup_retains_reference_and_fails_job(self):
-        self.fake.files.delete_error = gemini.errors.ClientError(403, {"error": {"message": PROVIDER_PRIVATE_TEXT + TEST_KEY}})
+        self.fake.files.delete_error = errors.ClientError(403, {"error": {"message": PROVIDER_PRIVATE_TEXT + TEST_KEY}})
         self.assert_sanitized_failure()
         self.assertEqual(len(self.fake.models.calls), 1)
         self.assertTrue(self.pending)
         self.assertFalse(any(event == "forgotten" for event, _ in self.events))
 
     def test_cleanup_of_an_already_deleted_file_is_successful(self):
-        self.fake.files.delete_error = gemini.errors.ClientError(404, {"error": {"message": "Not found"}})
+        self.fake.files.delete_error = errors.ClientError(404, {"error": {"message": "Not found"}})
         name = "files/" + "a" * 32
         self.pending.add(name)
         unresolved = gemini.cleanup_files([name], on_deleted=self.deleted)
         self.assertEqual(unresolved, [])
         self.assertFalse(self.pending)
         self.assertEqual(self.fake.files.deletes, [name])
+
+    def test_old_inaccessible_reference_is_retained_but_reported_separately(self):
+        name = "files/" + "a" * 32
+        self.pending.add(name)
+        self.fake.files.delete_error = errors.ClientError(403, {"error": {"message": "Denied"}})
+        inaccessible = set()
+        remaining = gemini.cleanup_files([name], self.deleted, on_inaccessible=inaccessible.add)
+        self.assertEqual(remaining, [name])
+        self.assertEqual(inaccessible, {name})
+        self.assertEqual(self.pending, {name})
+        self.assertFalse(self.fake.files.uploads)
+        self.assertFalse(self.fake.models.calls)
+
+    def test_inaccessible_reference_still_blocks_when_list_fails_or_contains_file(self):
+        name = "files/" + "a" * 32
+        self.fake.files.delete_error = errors.ClientError(403, {"error": {"message": "Denied"}})
+        for list_error in (None, TimeoutError("Offline")):
+            with self.subTest(list_failed=list_error is not None):
+                self.fake.files.files[name] = self.fake.files.file(name)
+                self.fake.files.list_error = list_error
+                inaccessible = set()
+                remaining = gemini.cleanup_files([name], on_inaccessible=inaccessible.add)
+                self.assertEqual(remaining, [name])
+                self.assertFalse(inaccessible)
+
+    def test_incomplete_file_list_does_not_release_reference(self):
+        name = "files/" + "a" * 32
+        self.fake.files.delete_error = errors.ClientError(403, {"error": {"message": "Denied"}})
+
+        def partial_list(**kwargs):
+            yield self.fake.files.file("files/other")
+            raise TimeoutError("Next page failed")
+
+        inaccessible = set()
+        with patch.object(self.fake.files, "list", side_effect=partial_list):
+            remaining = gemini.cleanup_files([name], on_inaccessible=inaccessible.add)
+        self.assertEqual(remaining, [name])
+        self.assertFalse(inaccessible)
+
+    def test_list_size_limit_does_not_release_reference(self):
+        self.fake.files.files = {str(i): self.fake.files.file(f"files/item{i}") for i in range(1000)}
+        self.assertFalse(gemini._file_absent_from_project(self.fake, "files/missing"))
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg må vere installert")
@@ -386,6 +503,75 @@ class GeminiApiTests(NoNetworkCase):
         }
         settings.update(changes)
         return settings
+
+    def test_narrated_ranking_is_rendered_and_metadata_survives_api(self):
+        clip_id = self.api.app.state.store.source_clips(self.project_id)[0]["id"]
+        self.fake.models.text = json.dumps({
+            "presentation": {"title": "Rangering", "ranking_direction": "best_first", "narration": True},
+            "segments": [{"clip_id": clip_id, "start_seconds": 0, "end_seconds": 1, "order": 1,
+                          "ranking": {"rank": 1, "title": "Blått motiv", "criterion": "Fargar",
+                                      "reason": "Den blå fargen er tydeleg."}, "voiceover": "Blått!"}],
+        })
+
+        def short_voice(text, output_path, **kwargs):
+            with wave.open(str(output_path), "wb") as sound:
+                sound.setnchannels(1)
+                sound.setsampwidth(2)
+                sound.setframerate(16000)
+                sound.writeframes(b"\0\0" * 3200)
+            return {"path": str(output_path), "duration": 0.2, "voice": "Local test"}
+
+        with patch("app.narration.availability", return_value={"available": True}), patch(
+            "app.narration.synthesize", side_effect=short_voice,
+        ):
+            response = self.submit(description="Lag ein rangeringsvideo best til verst. Gjerne snakk om fargane.")
+            self.assertEqual(response.status_code, 202, response.text)
+            job = self.await_job(response.json()["id"])
+        self.assertEqual(job["status"], "completed", job)
+        part = job["plan"][0]
+        self.assertEqual(part["ranking"]["rank"], 1)
+        self.assertEqual(part["presentation"]["title"], "Rangering")
+        self.assertTrue(part["presentation"]["narration"])
+        self.assertEqual(part["voiceover"], "Blått!")
+        self.assertNotIn("path", part)
+        self.assertNotIn(TEST_KEY, json.dumps(job))
+        self.assertEqual(len(self.fake.models.calls), 1)
+
+    def test_unavailable_requested_voice_is_rejected_before_google_upload(self):
+        with patch("app.narration.availability", return_value={"available": False}):
+            response = self.submit(description="Ranger klippa best til verst og snakk om dei.")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("forteljarstemme", response.json()["detail"])
+        self.assertFalse(self.fake.files.uploads)
+        self.assertFalse(self.fake.models.calls)
+
+    def test_orphan_reference_does_not_block_new_job_and_remains_visible(self):
+        old_name = "files/" + "a" * 32
+        store = self.api.app.state.store
+        clip_id = store.source_clips(self.project_id)[0]["id"]
+        self.fake.models.text = json.dumps({"segments": [
+            {"clip_id": clip_id, "start_seconds": 0, "end_seconds": 1, "order": 1},
+        ]})
+        store.execute("INSERT INTO gemini_files(file_name,job_id,created_at) VALUES(?,NULL,?)",
+                      (old_name, "2026-01-01T00:00:00+00:00"))
+        original_delete = self.fake.files.delete
+
+        def delete_with_orphan(*, name, config=None):
+            if name == old_name:
+                raise errors.ClientError(403, {"error": {"message": "Denied"}})
+            return original_delete(name=name, config=config)
+
+        with patch.object(self.fake.files, "delete", side_effect=delete_with_orphan):
+            response = self.submit()
+            self.assertEqual(response.status_code, 202, response.text)
+            job = self.await_job(response.json()["id"])
+        self.assertEqual(job["status"], "completed", job)
+        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertEqual(store.all("SELECT file_name FROM gemini_files"), [{"file_name": old_name}])
+        config = self.api.get("/api/config").json()
+        self.assertTrue(config["gemini_cleanup_warning"])
+        self.assertNotIn(old_name, json.dumps(config))
+        self.assertNotIn(TEST_KEY, json.dumps(config))
 
     def submit(self, **changes):
         return self.api.post(f"/api/projects/{self.project_id}/jobs", json=self.settings(**changes))
@@ -455,7 +641,7 @@ class GeminiApiTests(NoNetworkCase):
         self.client_constructor.assert_not_called()
 
     def test_provider_failure_persists_without_basic_fallback_or_automatic_retry(self):
-        self.fake.models.error = gemini.errors.ClientError(429, {"error": {
+        self.fake.models.error = errors.ClientError(429, {"error": {
             "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "RESOURCE_EXHAUSTED",
         }})
         with self.captured_logs() as logs:
@@ -480,8 +666,8 @@ class GeminiApiTests(NoNetworkCase):
         self.assertEqual(len(self.fake.models.calls), 1, "Omstart skal ikkje prøve ein betalt analyse på nytt")
 
     def test_failed_remote_cleanup_is_persisted_and_retried_on_restart_without_analysis(self):
-        self.fake.models.error = gemini.errors.ClientError(429, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
-        self.fake.files.delete_error = gemini.errors.ClientError(403, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
+        self.fake.models.error = errors.ClientError(429, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
+        self.fake.files.delete_error = errors.ClientError(403, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
         response = self.submit()
         self.assertIn(response.status_code, (200, 201, 202), response.text)
         job = self.await_job(response.json()["id"])

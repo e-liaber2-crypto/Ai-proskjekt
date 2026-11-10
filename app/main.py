@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import gemini, media
+from . import gemini, media, narration
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
@@ -276,10 +276,16 @@ class VideoWorker:
         names = [row["file_name"] for row in self.store.all("SELECT file_name FROM gemini_files")]
         if not names:
             return True
-        remaining = gemini.cleanup_files(names, lambda name: self.store.execute("DELETE FROM gemini_files WHERE file_name=?", (name,)))
+        inaccessible = set()
+        remaining = gemini.cleanup_files(
+            names, lambda name: self.store.execute("DELETE FROM gemini_files WHERE file_name=?", (name,)),
+            on_inaccessible=inaccessible.add,
+        )
         if remaining:
             LOGGER.warning("Opprydding av %s mellombelse Google-filer står att. Ingen analyse vart starta av oppryddinga.", len(remaining))
-        return not remaining
+        # Historiske 403-referansar som manglar i ei fullført filliste blir
+        # bevarte for seinare opprydding, men låser ikkje nye prosjekt.
+        return not (set(remaining) - inaccessible)
 
     def process(self, job):
         output_dir = self.store.directory / "outputs" / job["id"]
@@ -293,11 +299,17 @@ class VideoWorker:
 
             ai_mode = settings.get("mode", "basic") == "gemini"
             if ai_mode:
+                configuration_error = gemini.configuration_error()
+                if configuration_error:
+                    raise gemini.GeminiError(configuration_error, "configuration")
                 if not settings.get("ai_consent"):
                     raise gemini.GeminiError("AI-jobben manglar samtykke til å sende klippa til Google.", "consent")
+                requirements = gemini.editorial_requirements(settings["description"])
+                if requirements["narration_requested"] and not narration.availability()["available"]:
+                    raise media.MediaError("Norsk forteljarstemme er ikkje tilgjengeleg på denne maskina. Installer ei norsk Windows-stemme eller fjern ønsket om tale.")
                 progress(2, "Ryddar eventuelle tidlegare Google-filer")
                 if not self.cleanup_pending():
-                    raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast. Kontroller nøkkel og nettverk, og start serveren på nytt før ny AI-analyse.", "cleanup")
+                    raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast eller kontrollerast. Kontroller API-tilgang og nettverk før du prøver igjen.", "cleanup")
 
                 def remember_file(name):
                     self.store.execute("INSERT OR IGNORE INTO gemini_files(file_name,job_id,created_at) VALUES(?,?,?)", (name, job["id"], now()))
@@ -313,7 +325,10 @@ class VideoWorker:
                 plan = media.build_plan(clips, settings["duration_seconds"], settings["style"])
             media.validate_plan(plan, clips, settings["duration_seconds"])
             public_plan = [{"clip_id": part["clip_id"], "start_seconds": part["start"],
-                            "end_seconds": part["start"] + part["duration"], "order": index + 1}
+                            "end_seconds": part["start"] + part["duration"], "order": index + 1,
+                            **({"ranking": part["ranking"]} if part.get("ranking") else {}),
+                            **({"presentation": part["presentation"]} if part.get("presentation") else {}),
+                            **({"voiceover": part["voiceover"]} if part.get("voiceover") else {})}
                            for index, part in enumerate(plan)]
             self.store.execute("UPDATE jobs SET plan=? WHERE id=?", (json.dumps(public_plan), job["id"]))
 
@@ -332,7 +347,8 @@ class VideoWorker:
             message = str(error) if isinstance(error, media.MediaError) else "Videobehandlinga feila. Kontroller serverloggen og prøv igjen."
             if isinstance(error, gemini.GeminiError):
                 # Ikkje logg SDK-unntak, HTTP-svar, instruksjonar eller nøkkelverdiar.
-                LOGGER.warning("Gemini-jobb %s feila (%s)", job["id"], error.code)
+                LOGGER.warning("Gemini-jobb %s feila (%s, steg=%s, HTTP=%s)",
+                               job["id"], error.code, error.operation or "ukjent", error.http_status or "ukjent")
             else:
                 LOGGER.exception("Videobehandling feila for jobb %s", job["id"])
             self.store.execute("UPDATE jobs SET status='failed',stage='Behandlinga feila',error=?,finished_at=? WHERE id=?",
@@ -374,7 +390,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @application.get("/api/config")
     def config():
+        pending_cleanup = store.one("""SELECT COUNT(*) AS n FROM gemini_files f
+            LEFT JOIN jobs j ON j.id=f.job_id
+            WHERE j.id IS NULL OR j.status NOT IN ('queued','processing')""")["n"]
         return {"mode": "basic", "local_demo": True, "ai_available": gemini.configured(),
+                "gemini_configuration_error": gemini.configuration_error(),
+                "narration_available": narration.availability()["available"],
+                "gemini_cleanup_warning": (
+                    "Opprydding av tidlegare Google-filer står att. Referansane er bevarte og blir prøvde igjen. "
+                    "Gamle referansar utan tilgang som manglar i Google-prosjektet si filliste, blokkerer ikkje nye jobbar."
+                    if pending_cleanup else None),
                 "gemini_model": gemini.model_name(), "transcription_available": False,
                 "ffmpeg_available": media.tools_available(), "timezone": "Europe/Oslo",
                 "limits": {"max_upload_mb": 200, "max_files": MAX_FILES, "max_clip_seconds": MAX_CLIP_SECONDS,
@@ -496,7 +521,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if not body.description.strip():
                     raise HTTPException(400, "Skriv kva du ønskjer at Gemini skal lage.")
                 if not gemini.configured():
-                    raise HTTPException(503, "GEMINI_API_KEY manglar i servermiljøet. Set nøkkelen lokalt og start serveren på nytt, eller vel enkel redigering.")
+                    raise HTTPException(503, gemini.configuration_error())
+                try:
+                    requirements = gemini.editorial_requirements(body.description)
+                except gemini.GeminiError as error:
+                    raise HTTPException(400, str(error)) from None
+                if requirements["narration_requested"] and not narration.availability()["available"]:
+                    raise HTTPException(400, "Norsk forteljarstemme er ikkje tilgjengeleg på denne maskina. Installer ei norsk Windows-stemme eller fjern ønsket om tale.")
                 if len(clips) > gemini.MAX_AI_FILES or sum(clip["duration"] for clip in clips) > gemini.MAX_AI_SOURCE_SECONDS:
                     raise HTTPException(400, "AI-modus støttar høgst ti klipp og 30 minutt samla kjeldemateriale per jobb.")
             try:
@@ -608,3 +639,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
 
 app = create_app()
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000, debug=True)

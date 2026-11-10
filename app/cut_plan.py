@@ -9,14 +9,50 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import media
 
 
 MAX_RESPONSE_CHARACTERS = 64 * 1024
 MIN_SEGMENT_SECONDS = 1 / 24
+
+
+def _readable_text(value: str) -> str:
+    if not value.strip() or any(not char.isprintable() for char in value):
+        raise ValueError("Teksten må vere lesbar tekst på éi linje.")
+    return value.strip()
+
+
+class Presentation(BaseModel):
+    """Avgrensa tekst og val som den lokale videomotoren kan vise."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    title: str | None = Field(default=None, min_length=1, max_length=60)
+    ranking_direction: Literal["best_first", "worst_first"] = "best_first"
+    narration: bool = False
+
+    @field_validator("title")
+    @classmethod
+    def readable_title(cls, value):
+        return _readable_text(value) if value is not None else None
+
+
+class RankingLabel(BaseModel):
+    """Synleg plassering og ei etterprøvbar, subjektiv AI-grunngiving."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    rank: int = Field(ge=1, le=10)
+    title: str = Field(min_length=1, max_length=36)
+    reason: str = Field(min_length=1, max_length=180)
+    criterion: str = Field(min_length=1, max_length=60)
+
+    @field_validator("title", "reason", "criterion")
+    @classmethod
+    def readable_text(cls, value):
+        return _readable_text(value)
 
 
 class Segment(BaseModel):
@@ -28,6 +64,13 @@ class Segment(BaseModel):
     start_seconds: float = Field(strict=True, ge=0, allow_inf_nan=False)
     end_seconds: float = Field(strict=True, gt=0, allow_inf_nan=False)
     order: int = Field(strict=True, ge=1, le=media.MAX_SEGMENTS)
+    ranking: RankingLabel | None = None
+    voiceover: str | None = Field(default=None, min_length=1, max_length=220)
+
+    @field_validator("voiceover")
+    @classmethod
+    def readable_voiceover(cls, value):
+        return _readable_text(value) if value is not None else None
 
 
 class CutPlan(BaseModel):
@@ -36,6 +79,7 @@ class CutPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
     segments: list[Segment] = Field(min_length=1, max_length=media.MAX_SEGMENTS)
+    presentation: Presentation | None = None
 
 
 def _reject_constant(_value: str):
@@ -64,7 +108,9 @@ def _source_number(value: object) -> float:
     return number
 
 
-def parse_plan(text: str, clips: list[dict], target_duration: float) -> list[dict]:
+def parse_plan(text: str, clips: list[dict], target_duration: float, *, require_ranking: bool = False,
+               ranking_direction: Literal["best_first", "worst_first"] | None = None,
+               narration_requested: bool = False, expected_title: str | None = None) -> list[dict]:
     """Avvis ugyldige svar, og returner ein plan som FFmpeg-motoren kan bruke.
 
     Feiltekstane inneheld aldri modellsvaret eller Pydantic sine rå feil, som
@@ -85,6 +131,8 @@ def parse_plan(text: str, clips: list[dict], target_duration: float) -> list[dic
         ) from None
     try:
         cut_plan = CutPlan.model_validate(decoded)
+        requested = Presentation(title=expected_title, ranking_direction=ranking_direction or "best_first",
+                                 narration=narration_requested)
     except (ValidationError, ValueError, TypeError, RecursionError):
         raise media.MediaError(
             "AI-klippeplanen har ugyldige felt. Han må innehalde eitt til tolv "
@@ -128,6 +176,37 @@ def parse_plan(text: str, clips: list[dict], target_duration: float) -> list[dic
     if [segment.order for segment in ordered] != list(range(1, len(ordered) + 1)):
         raise media.MediaError("Utdraga må ha unik rekkjefølgje frå 1 til talet på utdrag, utan hol.")
 
+    ranked = any(segment.ranking is not None for segment in ordered)
+    presentation = cut_plan.presentation or Presentation()
+    if require_ranking and not ranked:
+        raise media.MediaError("Gemini manglar plasseringar og grunngivingar for rangeringsvideoen.")
+    if ranked:
+        if (len(ordered) != len(sources)
+                or {segment.clip_id for segment in ordered} != set(sources)
+                or any(segment.ranking is None for segment in ordered)):
+            raise media.MediaError("Ei rangering må vise kvart kjeldeklipp nøyaktig éin gong med ei plassering.")
+        if (cut_plan.presentation is not None
+                and "ranking_direction" in cut_plan.presentation.model_fields_set
+                and presentation.ranking_direction != requested.ranking_direction):
+            raise media.MediaError("Rangeringa følgjer ikkje den bestilte visingsrekkjefølgja.")
+        ranks = list(range(1, len(sources) + 1))
+        if requested.ranking_direction == "worst_first":
+            ranks.reverse()
+        if [segment.ranking.rank for segment in ordered] != ranks:
+            raise media.MediaError("Rangeringa må ha unike plasseringar og følgje den bestilte visingsrekkjefølgja.")
+        if len({segment.ranking.criterion for segment in ordered}) != 1:
+            raise media.MediaError("Alle klippa må rangerast etter det same kriteriet.")
+    if requested.narration and any(segment.voiceover is None for segment in ordered):
+        raise media.MediaError("Forteljarstemma manglar ein taletekst for eitt eller fleire utdrag.")
+
+    # Modellen kan foreslå tekst, men berre bestillinga kan aktivere tale eller
+    # endre eksplisitt vald rekkjefølgje/tittel.
+    presentation = presentation.model_copy(update={
+        "title": requested.title or presentation.title or ("Rangering" if ranked else None),
+        "ranking_direction": requested.ranking_direction,
+        "narration": requested.narration,
+    })
+
     plan = []
     source_intervals: dict[str, list[tuple[float, float]]] = {}
     for segment in ordered:
@@ -152,6 +231,13 @@ def parse_plan(text: str, clips: list[dict], target_duration: float) -> list[dic
                 "has_audio": source["has_audio"],
             }
         )
+        if segment.ranking is not None:
+            plan[-1]["ranking"] = segment.ranking.model_dump()
+        if segment.voiceover is not None:
+            plan[-1]["voiceover"] = segment.voiceover
+
+    if ranked or cut_plan.presentation is not None or requested.narration or requested.title:
+        plan[0]["presentation"] = presentation.model_dump()
 
     for intervals in source_intervals.values():
         chronological = sorted(intervals)

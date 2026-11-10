@@ -36,6 +36,7 @@ class GeminiTransportTests(unittest.TestCase):
                 payload = json.loads(request.content)
                 self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
                 self.assertIn("responseJsonSchema", payload["generationConfig"])
+                self.assertNotIn("temperature", payload["generationConfig"])
                 self.assertIn("fileData", payload["contents"][0]["parts"][1])
                 return httpx.Response(200, json={"candidates": [{
                     "content": {"role": "model", "parts": [{"text": json.dumps({"segments": [
@@ -55,7 +56,7 @@ class GeminiTransportTests(unittest.TestCase):
             # Ein statisk testverdi blir berre brukt av den lokale mock-transporten.
             client = genai.Client(api_key="offline-test-key", vertexai=False, http_options=options)
             with patch("app.gemini._client", return_value=client), patch(
-                "socket.socket.connect", side_effect=AssertionError("Nettverk er forbode i denne testen."),
+                "httpx.HTTPTransport.handle_request", side_effect=AssertionError("Eksternt HTTP-nettverk er forbode i denne testen."),
             ):
                 plan = gemini.generate_plan(
                     [{"id": "clip", "path": str(source), "duration": 2, "has_audio": False}],

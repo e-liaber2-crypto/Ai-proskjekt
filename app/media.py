@@ -67,7 +67,7 @@ def _local_file(path: Path | str) -> Path:
     return path.resolve()
 
 
-def _run(command: list[str], timeout: float, failure: str) -> subprocess.CompletedProcess:
+def _run(command: list[str], timeout: float, failure: str, *, cwd: Path | None = None) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
             command,
@@ -77,6 +77,7 @@ def _run(command: list[str], timeout: float, failure: str) -> subprocess.Complet
             errors="replace",
             timeout=timeout,
             check=False,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired as exc:
         raise MediaError("Videobehandlinga tok for lang tid og vart stoppa.") from exc
@@ -236,6 +237,8 @@ def render(
         progress(5, "Klippeplanen er kontrollert")
         with tempfile.TemporaryDirectory(prefix="render-", dir=output_path.parent) as temporary:
             workdir = Path(temporary)
+            from . import presentation, narration
+            narrate = bool((plan[0].get("presentation") or {}).get("narration"))
             for index, segment in enumerate(plan):
                 duration = float(segment["duration"])
                 start = float(segment["start"])
@@ -259,6 +262,10 @@ def render(
                     video_filter += f",fade=t=in:st=0:d={fade:.6f},fade=t=out:st={end:.6f}:d={fade:.6f}"
                     audio_filter += f",afade=t=in:st=0:d={fade:.6f},afade=t=out:st={end:.6f}:d={fade:.6f}"
 
+                overlays = presentation.filters(plan, index, width, height, workdir)
+                if overlays:
+                    video_filter += "," + ",".join(overlays)
+
                 command = [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                     "-threads", "2", "-filter_threads", "1",
@@ -268,9 +275,26 @@ def render(
                 ]
                 if not segment.get("has_audio"):
                     command += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+                source_audio = "0:a:0" if segment.get("has_audio") else "1:a:0"
+                if narrate:
+                    speech = narration.synthesize(segment.get("voiceover", ""), workdir / f"voice-{index:02d}.wav")
+                    padding = min(0.2, duration * 0.1)
+                    usable = duration - 2 * padding
+                    rate = max(1.0, speech["duration"] / usable)
+                    if rate > 1.25:
+                        raise MediaError("Forteljarteksten er for lang for eit klipp. Vel lengre video eller be om kortare kommentarar.")
+                    voice_input = 1 if segment.get("has_audio") else 2
+                    command += ["-i", str(speech["path"])]
+                    mixed = (f"[{source_audio}]{audio_filter},volume=0.14[background];"
+                             f"[{voice_input}:a:0]aresample=48000,asetpts=PTS-STARTPTS,atempo={rate:.6f},"
+                             f"adelay={int(padding * 1000)}:all=1,apad,atrim=duration={duration:.6f}[voice];"
+                             "[background][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+                             "alimiter=limit=0.95[mixed]")
+                    command += ["-filter_complex_threads", "1", "-filter_complex", mixed,
+                                "-map", "0:v:0", "-map", "[mixed]", "-vf", video_filter]
+                else:
+                    command += ["-map", "0:v:0", "-map", source_audio, "-vf", video_filter, "-af", audio_filter]
                 command += [
-                    "-map", "0:v:0", "-map", "0:a:0" if segment.get("has_audio") else "1:a:0",
-                    "-vf", video_filter, "-af", audio_filter,
                     "-t", f"{duration:.6f}",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                     "-maxrate", "3M", "-bufsize", "6M",
@@ -283,6 +307,7 @@ def render(
                     command,
                     timeout=min(900, max(60, duration * 4 + 30)),
                     failure=f"Kunne ikkje behandle klipp {index + 1}. Prøv ei anna videofil.",
+                    cwd=workdir,
                 )
                 progress(10 + int(80 * (index + 1) / len(plan)), f"Klipp {index + 1} av {len(plan)} er ferdig")
 

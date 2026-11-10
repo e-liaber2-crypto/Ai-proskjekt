@@ -337,6 +337,7 @@ async function editor(id, token) {
       state.latest = job;
       state.project.jobs = [state.latest, ...(state.project.jobs || [])];
       updateJob();
+      updateResult();
       updateHistory();
       updateControls();
       beginPolling(token);
@@ -364,7 +365,7 @@ function requestedDuration() {
 function editingModeError() {
   if (byId("edit-mode")?.value !== "gemini") return "";
   if (!state.config?.ai_available)
-    return "Gemini er ikkje konfigurert på serveren. Sjå README for oppsett, eller vel enkel redigering utan AI. Ingen AI-førespurnad er send.";
+    return state.config?.gemini_configuration_error || "Gemini er ikkje konfigurert på serveren. Sjå README for oppsett, eller vel enkel redigering utan AI. Ingen AI-førespurnad er send.";
   const maxFiles = state.config?.limits?.max_ai_files || 10;
   if (state.project.clips.length > maxFiles)
     return `Denne appen tillèt opptil ${maxFiles} klipp per AI-jobb. Alle ${state.project.clips.length} prosjektklippa ville blitt sende. Fjern nokre klipp eller vel enkel modus.`;
@@ -388,7 +389,9 @@ function updateEditingMode(locked) {
     : `Lokal klipping og samansetjing, utan AI. Opptil ${state.config?.limits?.max_files || 12} videoklipp per prosjekt.`;
   byId("gemini-availability").textContent = state.config?.ai_available
     ? `API-nøkkel er konfigurert på serveren. Modell: ${state.config.gemini_model || "vald på serveren"}. Dette stadfestar ikkje at API-tilgangen eller kvoten er testa.`
-    : "Gemini er ikkje konfigurert: API-nøkkel manglar på serveren. Sjå README for oppsett og start serveren på nytt. Ingen AI-førespurnad blir send frå dette skjemaet utan oppsett.";
+    : state.config?.gemini_configuration_error || "Gemini er ikkje konfigurert: API-nøkkel manglar på serveren. Sjå README for oppsett og start serveren på nytt. Ingen AI-førespurnad blir send frå dette skjemaet utan oppsett.";
+  if (state.config?.gemini_cleanup_warning)
+    byId("gemini-availability").textContent += ` ${state.config.gemini_cleanup_warning}`;
   byId("gemini-file-limit").textContent =
     `Appen si AI-grense er ${maxFiles} videofiler og ${duration(maxSource)} kjeldemateriale totalt per jobb. Dette er ressursgrenser i denne appen, ikkje Google-kvoten. Alle prosjektklippa blir analyserte. Enkel modus støttar framleis opptil ${state.config?.limits?.max_files || 12} filer.`;
   byId("gemini-validation").textContent = locked ? "" : editingModeError();
@@ -399,7 +402,7 @@ function updateEditingMode(locked) {
     ? "Kva skal Gemini lage? (påkravd)"
     : "Kva vil du lage?";
   byId("description-hint").textContent = gemini
-    ? "Skildre kva som er relevant i materialet, ønskte utdrag, rekkjefølgje og uttrykk. Instruksjonen blir send til Google saman med alle prosjektklippa."
+    ? `Be om klippeval, tempo, opningstittel eller ein rangeringsvideo med farga tal. Skriv om du vil ha best eller verst først, og kva klippa skal vurderast etter. ${state.config?.narration_available ? "Norsk forteljarstemme er tilgjengeleg: be om korte kommentarar til klippa." : "Norsk forteljarstemme er ikkje tilgjengeleg på denne maskina."} Musikk og automatiske undertekstar er førebels ikkje støtta.`
     : "Instruksjonen blir lagra med eksporten. Enkel modus tolkar ikkje teksten og vel ikkje motiv med AI.";
 }
 function updateControls() {
@@ -567,12 +570,19 @@ function updateResult() {
   if (!slot) return;
   const job = state.completed;
   if (!job) {
-    slot.innerHTML = `<div class="preview-empty">${icons("play")}<h3>Her kjem videoen din</h3><p>Last opp klipp og start behandlinga. Det ferdige resultatet kan spelast av og lastast ned her.</p></div>`;
+    const failed = state.latest?.status === "failed";
+    slot.innerHTML = `<div class="preview-empty">${icons("play")}<h3>${failed ? "Ingen ferdig video frå siste forsøk" : "Her kjem videoen din"}</h3><p>${failed ? "Jobben feila før ein ny video vart ferdig. Sjå feilmeldinga under." : "Last opp klipp og start behandlinga. Det ferdige resultatet kan spelast av og lastast ned her."}</p></div>`;
     return;
   }
-  if (slot.dataset.job === job.id) return;
-  slot.dataset.job = job.id;
+  const resultState = `${job.id}:${state.latest?.id}:${state.latest?.status}`;
+  if (slot.dataset.job === resultState) return;
+  slot.dataset.job = resultState;
   slot.replaceChildren();
+  if (state.latest && state.latest.id !== job.id) {
+    slot.append(element("p", "result-status-notice", state.latest.status === "failed"
+      ? "Siste forsøk feila. Videoen under er ein eldre eksport og inneheld ikkje endringane du nettopp bad om."
+      : "Ein ny video er under behandling. Videoen under er ein eldre eksport."));
+  }
   const video = document.createElement("video");
   video.className = "video-preview";
   video.controls = true;
@@ -593,9 +603,36 @@ function updateResult() {
   const resultMode = element(
     "p",
     "result-mode",
-    `Siste fullførte eksport · ${modeName(jobMode(job))}`,
+    `Fullført ${date(job.created_at, { hour: "2-digit", minute: "2-digit" })} · ${modeName(jobMode(job))}`,
   );
   slot.append(resultMode, video, metadata, download);
+  const presentation = job.plan?.[0]?.presentation;
+  const ranked = (job.plan || []).filter((part) => part.ranking);
+  if (ranked.length) {
+    const summary = element("section", "ranking-summary");
+    summary.append(element("h3", "", "AI si rangering"));
+    summary.append(element("p", "", `Vurdert etter: ${ranked[0].ranking.criterion}. Dette er ei subjektiv vurdering.`));
+    summary.append(element("p", "field-hint", presentation?.ranking_direction === "worst_first" ? "Videoen viser verst først og vinnaren til slutt." : "Videoen viser best først."));
+    const list = element("ul", "ranking-list");
+    for (const part of ranked) {
+      const item = element("li", "ranking-item");
+      item.append(element("strong", "", `${part.ranking.rank}. plass · ${part.ranking.title}`));
+      item.append(element("p", "", part.ranking.reason));
+      const clip = (state.project.clips || []).find((source) => source.id === part.clip_id);
+      if (clip) item.append(element("span", "field-hint", clip.original_name));
+      list.append(item);
+    }
+    summary.append(list);
+    slot.append(summary);
+  }
+  if (presentation?.narration) {
+    const script = element("details", "narration-script");
+    script.append(element("summary", "", "Forteljarteksten i videoen"));
+    for (const part of job.plan || []) {
+      if (part.voiceover) script.append(element("p", "", part.voiceover));
+    }
+    slot.append(script);
+  }
   scheduleForm(job);
 }
 function updateHistory() {
@@ -644,9 +681,9 @@ function beginPolling(token) {
       updateControls();
       if (job.status === "completed") {
         state.completed = job;
-        updateResult();
         updateHistory();
       }
+      updateResult();
       if (active(job)) beginPolling(token);
     } catch (error) {
       if (token === state.route) {
