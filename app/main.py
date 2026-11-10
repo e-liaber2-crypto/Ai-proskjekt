@@ -1,12 +1,14 @@
 """FastAPI, SQLite og éin bakgrunnsarbeidar for den lokale demonstrasjonen.
 
 Start med: python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-Ingen innlogging: bind berre til localhost, og ikkje set denne ut offentleg.
+Lokal bruk utan innlogging; offentleg lærardemo krev vertsnamn og passord.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import secrets
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import json
@@ -356,6 +358,10 @@ class VideoWorker:
 
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
+    public_host = os.getenv("PUBLIC_HOST", os.getenv("RENDER_EXTERNAL_HOSTNAME", "")).strip()
+    demo_password = os.getenv("DEMO_PASSWORD", "")
+    if public_host and (len(demo_password) < 16 or any(c in public_host for c in "/:*")):
+        raise RuntimeError("Public hosting requires an exact hostname and DEMO_PASSWORD of at least 16 characters.")
     directory = Path(data_dir or os.getenv("DATA_DIR", ROOT / "data")).expanduser().resolve()
     store = Store(directory)
     worker = VideoWorker(store)
@@ -371,10 +377,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     application.state.store = store
     application.state.worker = worker
     application.add_middleware(BodyLimitMiddleware, max_bytes=MAX_UPLOAD + 1024 * 1024)
-    application.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
+    application.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"] + ([public_host] if public_host else []))
 
     @application.middleware("http")
     async def local_only(request: Request, call_next):
+        if request.url.path == "/healthz" and request.method in ("GET", "HEAD"):
+            return JSONResponse({"status": "ok"})
+        if public_host or demo_password:
+            authenticated = False
+            try:
+                scheme, encoded = request.headers.get("authorization", "").split(" ", 1)
+                user, password = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)
+                authenticated = (scheme.lower() == "basic" and
+                                 secrets.compare_digest(user.encode(), b"laerar") and
+                                 secrets.compare_digest(password.encode(), demo_password.encode()))
+            except (ValueError, UnicodeError):
+                pass
+            if not authenticated:
+                return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Laerardemo", charset="UTF-8"', "Cache-Control": "no-store"})
         origin = request.headers.get("origin")
         if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
             parsed = urlsplit(origin)
@@ -641,4 +661,5 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)

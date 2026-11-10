@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ai-proskjekt-demo
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: DEMO_PASSWORD
+        generateValue: true
+      - key: DATA_DIR
+        value: /app/data

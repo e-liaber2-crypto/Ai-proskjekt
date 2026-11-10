@@ -2,7 +2,7 @@
 
 Ein lokal prototype for eit framtidig abonnementsbasert videoverktøy, laga med ein enkel struktur som passar eit VG2 IT-prosjekt. Du kan opprette prosjekt, laste opp videoklipp, velje innstillingar og eksportere ein ekte MP4-video med FFmpeg. Med ei konfigurert Gemini-kopling kan Google analysere videoane og foreslå kva utdrag som skal brukast, i kva rekkjefølgje.
 
-**Denne versjonen er ein lokal demonstrasjon utan innlogging.** Han skal berre køyrast på di eiga maskin. Enkel redigering fungerer utan API-nøkkel; Gemini-analyse er valfri og sender kjeldeklippa til Google. Betaling og automatisk publisering er ikkje aktiverte.
+**Standardoppsettet er ein lokal demonstrasjon utan innlogging.** For ein passordverna lærardemo på Render, sjå [DEPLOY.md](DEPLOY.md). Gratisdemoen har mellombels lagring og støttar ikkje Windows-forteljarstemma. Enkel redigering fungerer utan API-nøkkel; Gemini-analyse er valfri og sender kjeldeklippa til Google. Betaling og automatisk publisering er ikkje aktiverte.
 
 ## Kva fungerer?
 
