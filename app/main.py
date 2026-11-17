@@ -7,8 +7,6 @@ Lokal bruk utan innlogging; offentleg lærardemo krev vertsnamn og passord.
 from __future__ import annotations
 
 import asyncio
-import base64
-import secrets
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 import json
@@ -18,18 +16,16 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
-from typing import Literal
-from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import gemini, media, narration
+from .hosting import HostingSettings, configure_hosting
+from .schemas import EditInput, ProjectInput, ScheduleInput
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
@@ -38,8 +34,7 @@ MAX_UPLOAD = 200 * 1024 * 1024
 MAX_STORAGE = 2 * 1024 * 1024 * 1024
 MAX_FILES = 12
 MAX_CLIP_SECONDS = 1800
-MAX_EXPORT_SECONDS = 600
-ACTIVE = ("queued", "processing")
+MAX_EXPORT_SECONDS = media.MAX_EXPORT_SECONDS
 EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 MIME_TYPES = {"video/mp4", "video/quicktime", "video/x-matroska", "video/webm", "application/octet-stream"}
 DEFAULT_SETTINGS = {"duration_seconds": 30, "aspect": "16:9", "fit": "pad", "style": "professional", "subtitles": False, "mode": "basic", "ai_consent": False}
@@ -47,70 +42,6 @@ DEFAULT_SETTINGS = {"duration_seconds": 30, "aspect": "16:9", "fit": "pad", "sty
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-class ProjectInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=100)
-
-    @field_validator("name")
-    @classmethod
-    def clean_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value or any(ord(char) < 32 for char in value):
-            raise ValueError("Prosjektnamnet må innehalde lesbar tekst.")
-        return value
-
-
-class EditInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    description: str = Field(default="", max_length=4000)
-    duration_seconds: int = Field(ge=1, le=MAX_EXPORT_SECONDS, strict=True)
-    aspect: Literal["16:9", "9:16", "1:1"] = "16:9"
-    fit: Literal["pad", "crop"] = "pad"
-    style: Literal["calm", "energetic", "professional"] = "professional"
-    subtitles: bool = False
-    mode: Literal["basic", "gemini"] = "basic"
-    ai_consent: bool = Field(default=False, strict=True)
-
-
-class ScheduleInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    job_id: str
-    channel: Literal["YouTube", "Instagram", "TikTok"]
-    scheduled_at: datetime
-    timezone: str = Field(default="Europe/Oslo", max_length=80)
-    approved: bool = False
-
-
-class BodyLimitMiddleware:
-    """Avgrens også chunked-opplasting før multipart-parseren skriv heile fila."""
-
-    def __init__(self, app, max_bytes: int):
-        self.app, self.max_bytes = app, max_bytes
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            return await self.app(scope, receive, send)
-        headers = dict(scope.get("headers", []))
-        try:
-            content_length = int(headers.get(b"content-length", b"0"))
-        except ValueError:
-            return await JSONResponse({"detail": "Ugyldig førespurnadsstorleik."}, 400)(scope, receive, send)
-        if content_length > self.max_bytes:
-            return await JSONResponse({"detail": "Fila er for stor. Grensa er 200 MiB per fil."}, 413)(scope, receive, send)
-        received = 0
-
-        async def limited_receive():
-            nonlocal received
-            message = await receive()
-            if message["type"] == "http.request":
-                received += len(message.get("body", b""))
-                if received > self.max_bytes:
-                    raise HTTPException(413, "Fila er for stor. Grensa er 200 MiB per fil.")
-            return message
-
-        await self.app(scope, limited_receive, send)
 
 
 class Store:
@@ -358,10 +289,7 @@ class VideoWorker:
 
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
-    public_host = os.getenv("PUBLIC_HOST", os.getenv("RENDER_EXTERNAL_HOSTNAME", "")).strip()
-    demo_password = os.getenv("DEMO_PASSWORD", "")
-    if public_host and (len(demo_password) < 16 or any(c in public_host for c in "/:*")):
-        raise RuntimeError("Public hosting requires an exact hostname and DEMO_PASSWORD of at least 16 characters.")
+    hosting = HostingSettings.from_environment()
     directory = Path(data_dir or os.getenv("DATA_DIR", ROOT / "data")).expanduser().resolve()
     store = Store(directory)
     worker = VideoWorker(store)
@@ -369,51 +297,35 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application):
+        media.encoding_threads()
         worker.start()
-        yield
-        await asyncio.to_thread(worker.stop)
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(worker.stop)
 
     application = FastAPI(title="AI-prosjektet – lokal videodemo", lifespan=lifespan)
     application.state.store = store
     application.state.worker = worker
-    application.add_middleware(BodyLimitMiddleware, max_bytes=MAX_UPLOAD + 1024 * 1024)
-    application.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"] + ([public_host] if public_host else []))
+    configure_hosting(application, hosting, MAX_UPLOAD)
 
-    @application.middleware("http")
-    async def local_only(request: Request, call_next):
-        if request.url.path == "/healthz" and request.method in ("GET", "HEAD"):
-            return JSONResponse({"status": "ok"})
-        if public_host or demo_password:
-            authenticated = False
-            try:
-                scheme, encoded = request.headers.get("authorization", "").split(" ", 1)
-                user, password = base64.b64decode(encoded, validate=True).decode("utf-8").split(":", 1)
-                authenticated = (scheme.lower() == "basic" and
-                                 secrets.compare_digest(user.encode(), b"laerar") and
-                                 secrets.compare_digest(password.encode(), demo_password.encode()))
-            except (ValueError, UnicodeError):
-                pass
-            if not authenticated:
-                return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Laerardemo", charset="UTF-8"', "Cache-Control": "no-store"})
-        origin = request.headers.get("origin")
-        if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
-            parsed = urlsplit(origin)
-            if parsed.scheme not in ("http", "https") or parsed.netloc != request.headers.get("host"):
-                return JSONResponse({"detail": "Førespurnaden må kome frå den lokale nettsida."}, 403)
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-        if request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
+    @application.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
+    def health():
+        try:
+            database_ready = store.one("SELECT 1 AS ready")["ready"] == 1
+        except sqlite3.Error:
+            LOGGER.exception("Helsesjekken fekk ikkje kontakt med databasen")
+            database_ready = False
+        ready = database_ready and worker.thread.is_alive() and media.tools_available()
+        return JSONResponse({"status": "ok" if ready else "unavailable"}, status_code=200 if ready else 503)
 
     @application.get("/api/config")
     def config():
         pending_cleanup = store.one("""SELECT COUNT(*) AS n FROM gemini_files f
             LEFT JOIN jobs j ON j.id=f.job_id
             WHERE j.id IS NULL OR j.status NOT IN ('queued','processing')""")["n"]
-        return {"mode": "basic", "local_demo": True, "ai_available": gemini.configured(),
+        return {"mode": "basic", "local_demo": not hosting.hostname, "hosting": hosting.public_details(),
+                "ai_available": gemini.configured(),
                 "gemini_configuration_error": gemini.configuration_error(),
                 "narration_available": narration.availability()["available"],
                 "gemini_cleanup_warning": (

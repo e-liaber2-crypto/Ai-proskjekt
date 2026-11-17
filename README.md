@@ -4,11 +4,17 @@ Ein lokal prototype for eit framtidig abonnementsbasert videoverktøy, laga med 
 
 **Standardoppsettet er ein lokal demonstrasjon utan innlogging.** For ein passordverna lærardemo på Render, sjå [DEPLOY.md](DEPLOY.md). Gratisdemoen har mellombels lagring og støttar ikkje Windows-forteljarstemma. Enkel redigering fungerer utan API-nøkkel; Gemini-analyse er valfri og sender kjeldeklippa til Google. Betaling og automatisk publisering er ikkje aktiverte.
 
+## Render og kodekontroll
+
+Sjå [DEPLOY.md](DEPLOY.md) for førstegongsoppsett og oppdatering av ei eksisterande Render-teneste. GitHub Actions testar appen og Docker-oppsettet før ein Blueprint med `checksPass` deployar.
+
+Koden er delt etter ansvar: `app/main.py` handterer prosjekt, lagring og jobbkø, `app/hosting.py` handterer vertsnamn, tilgangsvern og HTTP-grenser, og `app/schemas.py` validerer inndata. `app/media.py` køyrer FFmpeg, medan Gemini, videotitlar og forteljarstemme har eigne modular. Grensesnittet ligg framleis i `index.html`, `styles.css` og `app.js`.
+
 ## Kva fungerer?
 
 - Prosjektoversikt og arbeidsflate med lagring i SQLite.
 - Opplasting av fleire videoklipp og kontroll av filene på serveren.
-- Ønskt lengd i minutt og sekund, også for videoar som varer fleire minutt.
+- Hurtigval for kort og lang video, tilpassa lengda på materialet, og fri innstilling i minutt og sekund.
 - Liggjande 16:9, ståande 9:16 og kvadratisk 1:1.
 - Val mellom kantar som bevarer heile biletet, og beskjering som fyller ramma.
 - Enkel redigering som klipper og set saman verkelege videofiler.
@@ -95,6 +101,7 @@ python3 -m venv .venv
 
 | Variabel | Bruk |
 | --- | --- |
+| `FFMPEG_THREADS` | Talet på FFmpeg-trådar (1–4). Standard er 2 lokalt og 1 i Render-Blueprint-en. |
 | `DATA_DIR` | Valfri plassering for databasen og videofilene. Standard er `data` i prosjektroten. |
 | `FFMPEG_BIN` | Valfri full sti til FFmpeg dersom programmet ikkje ligg i `PATH`. |
 | `FFPROBE_BIN` | Valfri full sti til ffprobe dersom programmet ikkje ligg i `PATH`. |
