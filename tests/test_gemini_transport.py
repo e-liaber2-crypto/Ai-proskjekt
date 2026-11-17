@@ -73,7 +73,9 @@ class GeminiTransportTests(unittest.TestCase):
             self.assertEqual(plan[0]["duration"], 1)
             self.assertEqual(len(requests), 4)  # Éi upload-økt, éin analyse, éi sletting.
             self.assertEqual(requests[2], ("POST", f"/v1beta/models/{gemini.DEFAULT_MODEL}:generateContent"))
-            self.assertEqual(analysis_options[0]["thinking"]["thinkingLevel"].lower(), "low")
+            thinking = analysis_options[0]["thinking"]
+            # SDK-versjonar kan bruke proto-namnet eller JSON-namnet i denne nested meldinga.
+            self.assertEqual(thinking.get("thinkingLevel", thinking.get("thinking_level", "")).lower(), "low")
             self.assertEqual(analysis_options[0]["timeout"]["read"], 180)
 
 
