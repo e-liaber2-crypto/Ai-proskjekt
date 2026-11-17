@@ -284,7 +284,7 @@ async function editor(id, token) {
         <form id="settings-form">
         <div class="field"><label for="edit-mode">Redigeringsmodus</label><select id="edit-mode" name="mode" aria-describedby="mode-note" data-lock><option value="basic">Enkel redigering utan AI</option><option value="gemini">AI-redigering med Gemini</option></select><span id="mode-note" class="field-hint"></span></div>
         <div id="basic-mode-info" class="info-box settings-note"><strong>Enkel modus, utan AI.</strong> Vi bruker starten av kvart klipp proporsjonalt, i opplastingsrekkefølgje. Roleg og profesjonell stil gir mjuke inn- og uttoningar; energisk stil bruker direkte klipp. Ingen videofiler blir sende til ei AI-teneste.</div>
-        <div id="gemini-mode-info" class="gemini-settings" hidden><div class="info-box warning settings-note"><strong>Alle klippa i prosjektet blir sende til Google.</strong> Gemini analyserer sjølve videoane og tekstinstruksjonen for å foreslå utdrag og rekkjefølgje. Dette kan koste pengar eller bruke API-kvote. Klippeplanen blir kontrollert før FFmpeg lagar videofila lokalt. Resultatet kan avvike frå ønsket ditt, og du må sjå gjennom det.</div><p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p><label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til at alle videoklippa i dette prosjektet og instruksjonen blir sende til Google for denne AI-eksporten, og forstår at det kan bruke kvote eller koste pengar.</span></label></div>
+        <div id="gemini-mode-info" class="gemini-settings" hidden><div class="info-box warning settings-note"><strong>Alle klippa i prosjektet blir sende til Google.</strong> Gemini analyserer sjølve videoane og tekstinstruksjonen for å foreslå utdrag og rekkjefølgje. Dette kan koste pengar eller bruke API-kvote. Ved overbelasting (HTTP 503) blir analysen prøvd opptil tre gonger med ventetid mellom forsøka. Klippeplanen blir kontrollert før FFmpeg lagar videofila lokalt. Resultatet kan avvike frå ønsket ditt, og du må sjå gjennom det.</div><p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p><label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til at alle videoklippa i dette prosjektet og instruksjonen blir sende til Google for denne AI-eksporten, inkludert opptil tre analyseforsøk ved HTTP 503, og forstår at det kan bruke kvote eller koste pengar.</span></label></div>
         <div class="field"><label id="description-label" for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" aria-describedby="description-hint" data-lock></textarea><span id="description-hint" class="field-hint"></span></div>
         <div class="field"><label id="duration-label">Ønskt lengd</label><div class="duration-presets" role="group" aria-label="Vel kort eller lang video"><button class="button secondary small" type="button" data-duration="30" data-lock aria-pressed="false">Kort · 30 sekund</button><button class="button secondary small" type="button" data-duration="180" data-lock aria-pressed="false">Lang · 3 minutt</button></div><div class="duration-fields" role="group" aria-labelledby="duration-label"><label for="duration-minutes">Minutt<input id="duration-minutes" type="number" min="0" max="10" step="1" value="0" required data-lock></label><label for="duration-seconds">Sekund<input id="duration-seconds" type="number" min="0" max="59" step="1" value="30" required data-lock></label></div><span class="field-hint">Frå 1 sekund til 10 minutt. Videoen kan ikkje bli lengre enn kjeldematerialet.</span></div>
         <div id="duration-warning" class="info-box warning duration-warning" role="status" hidden></div>
@@ -613,6 +613,19 @@ function updateJob() {
           "Videobehandlinga feila. Kontroller klippa og prøv på nytt.",
       ),
     );
+  if (job.status === "failed" && jobMode(job) === "gemini") {
+    const fallback = element("button", "button secondary small", "Vel enkel redigering utan AI");
+    fallback.type = "button";
+    fallback.addEventListener("click", () => {
+      if (!byId("edit-mode") || state.uploading || state.submitting) return;
+      byId("edit-mode").value = "basic";
+      byId("ai-consent").checked = false;
+      updateControls();
+      tell("Enkel redigering utan AI er vald. Kontroller lengd og format, og trykk Lag video når du er klar.");
+      byId("render-button").focus();
+    });
+    box.append(fallback);
+  }
   if (job.status === "completed")
     box.append(
       element(
