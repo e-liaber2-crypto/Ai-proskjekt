@@ -48,6 +48,17 @@ def tools_available() -> bool:
         return False
 
 
+def encoding_threads() -> int:
+    """Render Free brukar éin tråd; lokal bruk kan ha opptil fire."""
+    try:
+        count = int(os.getenv("FFMPEG_THREADS", "2"))
+    except ValueError as error:
+        raise MediaError("FFMPEG_THREADS må vere eit heiltal frå 1 til 4.") from error
+    if not 1 <= count <= 4:
+        raise MediaError("FFMPEG_THREADS må vere eit heiltal frå 1 til 4.")
+    return count
+
+
 def _number(value: object, label: str) -> float:
     try:
         if isinstance(value, bool):
@@ -230,6 +241,7 @@ def render(
         raise MediaError("Klippeplanen er lengre enn 10 minutt.")
 
     ffmpeg = _binary("ffmpeg")
+    threads = str(encoding_threads())
     width, height = ASPECTS[aspect]
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,7 +280,7 @@ def render(
 
                 command = [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                    "-threads", "2", "-filter_threads", "1",
+                    "-threads", threads, "-filter_threads", "1",
                     "-protocol_whitelist", "file,pipe",
                     "-format_whitelist", "mov,matroska,webm",
                     "-ss", f"{start:.6f}", "-i", str(_local_file(segment["path"])),
@@ -298,7 +310,7 @@ def render(
                     "-t", f"{duration:.6f}",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                     "-maxrate", "3M", "-bufsize", "6M",
-                    "-pix_fmt", "yuv420p", "-threads", "2",
+                    "-pix_fmt", "yuv420p", "-threads", threads,
                     "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
                     "-map_metadata", "-1", "-sn", "-dn",
                     "-movflags", "+faststart", str(destination),

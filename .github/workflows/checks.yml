@@ -1,0 +1,51 @@
+name: Check app and Render image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: node --check app.js && node --test tests/*.test.cjs
+
+  render-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the actual Render image
+        run: docker build -t klipp-test .
+      - name: Start a password protected Render-style service
+        run: >-
+          docker run -d --name klipp-test -p 8000:10000
+          -e PORT=10000 -e RENDER=true -e RENDER_EXTERNAL_HOSTNAME=demo.onrender.com
+          -e DEMO_PASSWORD=ci-only-password-not-a-real-secret -e FFMPEG_THREADS=1
+          klipp-test
+      - name: Check startup, access control and server configuration
+        run: |
+          curl --fail --retry 20 --retry-delay 2 --retry-all-errors http://localhost:8000/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)" = 401
+          curl --fail --user laerar:ci-only-password-not-a-real-secret http://localhost:8000/ > /dev/null
+          curl --fail --user laerar:ci-only-password-not-a-real-secret http://localhost:8000/api/config > /tmp/config.json
+          python -c "import json; c=json.load(open('/tmp/config.json')); assert c['ffmpeg_available'] and c['hosting']['ephemeral_storage']"
+      - name: Show container logs
+        if: always()
+        run: docker logs klipp-test || true

@@ -14,6 +14,8 @@ const state = {
   submitting: false,
   latest: null,
   completed: null,
+  configPromise: null,
+  durationPreset: null,
 };
 const statusNames = {
   queued: "I kø",
@@ -70,32 +72,62 @@ async function api(path, options = {}) {
   const headers = { ...options.headers };
   if (options.body && !(options.body instanceof FormData))
     headers["Content-Type"] = "application/json";
-  let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.body instanceof FormData ? 300_000 : 45_000);
   try {
-    response = await fetch(`/api${path}`, { ...options, headers });
-  } catch {
+    const response = await fetch(`/api${path}`, { ...options, headers, signal: controller.signal });
+    if (response.status === 401)
+      throw new Error("Du må logge inn igjen. Oppdater sida og bruk innlogginga til demonstrasjonen.");
+    if (!response.headers.get("content-type")?.includes("application/json"))
+      throw new Error("Serveren svarte ikkje med prosjektdata. På Render kan tenesta vere i ferd med å vakne eller starte på nytt. Vent litt og prøv igjen.");
+    const content = await response.json();
+    if (!response.ok) {
+      const detail = content.detail;
+      const message = Array.isArray(detail)
+        ? detail.map((item) => `${item.loc?.slice(1).join(".") || "Inndata"}: ${item.msg}`).join(" · ")
+        : detail;
+      throw new Error(typeof message === "string" ? message : `Førespurnaden feila (${response.status}). Prøv på nytt.`);
+    }
+    return content;
+  } catch (error) {
+    if (error.name === "AbortError")
+      throw new Error("Serveren brukte for lang tid. Vent litt og oppdater prosjektet for å sjå om handlinga vart lagra før du prøver igjen.");
+    if (!(error instanceof TypeError) && !(error instanceof SyntaxError)) throw error;
     throw new Error(
-      "Får ikkje kontakt med serveren. Kontroller at Python-serveren køyrer, og prøv på nytt.",
+      "Får ikkje kontakt med serveren. På Render kan tenesta bruke litt tid på å vakne. Vent litt og prøv igjen. Køyrer du lokalt, kontroller at Python-serveren er starta.",
     );
+  } finally {
+    clearTimeout(timeout);
   }
-  const content = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = content.detail;
-    const message = Array.isArray(detail)
-      ? detail
-          .map(
-            (item) =>
-              `${item.loc?.slice(1).join(".") || "Inndata"}: ${item.msg}`,
-          )
-          .join(" · ")
-      : detail;
-    throw new Error(
-      typeof message === "string"
-        ? message
-        : `Førespurnaden feila (${response.status}). Prøv på nytt.`,
-    );
+}
+async function loadConfig() {
+  if (state.config) return;
+  if (!state.configPromise) {
+    state.configPromise = api("/config").then((config) => {
+      if (!config.limits || typeof config.ffmpeg_available !== "boolean")
+        throw new Error("Serveroppsettet kunne ikkje lesast. Prøv igjen om litt.");
+      state.config = config;
+      updateEnvironment();
+    }).finally(() => { state.configPromise = null; });
   }
-  return content;
+  await state.configPromise;
+}
+function storageDescription() {
+  return state.config?.hosting?.hosted
+    ? "Prosjekta dine blir lagra på serveren."
+    : "Prosjekta dine blir lagra på denne maskina.";
+}
+function updateEnvironment() {
+  const hosted = state.config?.hosting?.hosted;
+  document.querySelector(".mode-badge").innerHTML = `<span></span>${hosted ? "Passordverna demo" : "Lokal app"} · ${state.config.ai_available ? "Gemini konfigurert" : "Enkel redigering"}`;
+  document.querySelector(".local-indicator").innerHTML = `<span></span>${hosted ? "Passordverna demonstrasjon" : "Lokal demonstrasjon"}`;
+  document.querySelector(".sidebar-bottom p").textContent = hosted
+    ? "Delt skuleprosjekt · Ingen betaling."
+    : "Skuleprosjekt · Ingen betaling.";
+  document.querySelector(".app-footer span:last-child").textContent = "Video blir behandla på serveren. Gemini sender klipp til Google etter samtykke.";
+  const note = byId("hosting-note");
+  note.hidden = !state.config?.hosting?.ephemeral_storage;
+  note.textContent = "Render-demo · Mellombels lagring: prosjekt og videoar kan forsvinne ved dvale, omstart eller ny deploy. Last ned videoar du vil ta vare på. Alle med demo-passordet ser dei same prosjekta.";
 }
 function badge(job) {
   return element(
@@ -135,7 +167,7 @@ function home() {
         <h1 id="home-title">Du har klippa.<br><span class="gradient-text">Skap samanhengen.</span></h1>
         <p class="hero-description">Samle videoklippa dine, vel lengd og uttrykk, og set dei saman til éin video. Vel enkel, lokal redigering eller la Gemini analysere materialet og foreslå ein klippeplan.</p>
         <div class="button-row"><a class="button" href="#prosjekt">${icons("plus")} Lag din første video</a><a class="button subtle" href="#slik-fungerer-det">Sjå arbeidsflyten ${icons("arrow")}</a></div>
-        <p class="hero-note">${icons("check")} Lokal demonstrasjon. Ingen konto eller betaling nødvendig.</p>
+        <p class="hero-note">${icons("check")} ${state.config?.hosting?.hosted ? "Passordverna skule-demo. Ingen betaling." : "Lokal demonstrasjon. Ingen konto eller betaling nødvendig."}</p>
       </div>
       <div class="flow-preview" aria-label="Illustrasjon av arbeidsflyten, ikkje ein ferdig video">
         <div class="flow-top"><span>DI NESTE HISTORIE</span><span class="pill">Frå idé til eksport</span></div>
@@ -157,7 +189,7 @@ function home() {
 async function projects(token) {
   const items = await api("/projects");
   if (token !== state.route) return;
-  app.innerHTML = `<div class="page-heading"><div><p class="eyebrow">DITT ARBEIDSOMRÅDE</p><h1>Mine prosjekt</h1><p class="description">Ein idé, nokre klipp og ein stad å byrje. Prosjekta dine blir lagra på denne maskina.</p></div><span class="pill" id="project-count"></span></div>
+  app.innerHTML = `<div class="page-heading"><div><p class="eyebrow">DITT ARBEIDSOMRÅDE</p><h1>Mine prosjekt</h1><p class="description">Ein idé, nokre klipp og ein stad å byrje. ${storageDescription()}</p></div><span class="pill" id="project-count"></span></div>
     <form id="create-project" class="panel create-project"><div class="field"><label for="project-name">Namn på nytt prosjekt</label><input id="project-name" name="name" required maxlength="100" placeholder="Til dømes: Ein dag på skulen" autocomplete="off"></div><button class="button" type="submit">${icons("plus")} Opprett prosjekt</button></form>
     <p id="create-error" class="error-inline" role="alert"></p><div class="project-grid" id="project-grid"></div>`;
   byId("project-count").textContent = `${items.length} prosjekt`;
@@ -242,7 +274,7 @@ async function editor(id, token) {
   state.latest = project.latest_job;
   state.completed =
     project.jobs?.find((job) => job.status === "completed") || null;
-  app.innerHTML = `<p class="breadcrumb"><a href="#prosjekt">Mine prosjekt</a><span>/</span>Arbeidsflate</p><div class="page-heading editor-heading"><div><p class="eyebrow">SKAP NOKO AV KLIPPA DINE</p><h1 id="editor-name"></h1><p class="description">Last opp, vel redigeringsmodus og eksporter. Prosjektet og den faktiske jobbstatusen er lagra når du oppdaterer sida.</p></div><span class="pill">Lokal app · Gemini som val</span></div>
+  app.innerHTML = `<p class="breadcrumb"><a href="#prosjekt">Mine prosjekt</a><span>/</span>Arbeidsflate</p><div class="page-heading editor-heading"><div><p class="eyebrow">SKAP NOKO AV KLIPPA DINE</p><h1 id="editor-name"></h1><p class="description">Last opp, vel redigeringsmodus og eksporter. ${storageDescription()}</p></div><span class="pill">${state.config?.hosting?.hosted ? "Skule-demo" : "Lokal app"} · Gemini som val</span></div>
     <div class="editor-layout"><div class="stack">
       <section class="panel" aria-labelledby="upload-heading"><div class="panel-header"><div class="panel-heading"><span class="section-number">01</span><h2 id="upload-heading">Videoklippa dine</h2></div><span id="clip-count" class="muted small"></span></div><div class="panel-body">
         <label class="upload-zone" id="drop-zone">${icons("upload")}<span class="upload-title">Vel videoklipp eller dra dei hit</span><span class="field-hint">MP4, MOV, MKV eller WebM · maks 200 MiB per fil<br>Opptil 12 klipp · maks 30 minutt per kjeldeklipp</span><input id="clip-upload" type="file" accept=".mp4,.mov,.mkv,.webm" multiple aria-label="Last opp videoklipp" data-lock></label>
@@ -254,11 +286,11 @@ async function editor(id, token) {
         <div id="basic-mode-info" class="info-box settings-note"><strong>Enkel modus, utan AI.</strong> Vi bruker starten av kvart klipp proporsjonalt, i opplastingsrekkefølgje. Roleg og profesjonell stil gir mjuke inn- og uttoningar; energisk stil bruker direkte klipp. Ingen videofiler blir sende til ei AI-teneste.</div>
         <div id="gemini-mode-info" class="gemini-settings" hidden><div class="info-box warning settings-note"><strong>Alle klippa i prosjektet blir sende til Google.</strong> Gemini analyserer sjølve videoane og tekstinstruksjonen for å foreslå utdrag og rekkjefølgje. Dette kan koste pengar eller bruke API-kvote. Klippeplanen blir kontrollert før FFmpeg lagar videofila lokalt. Resultatet kan avvike frå ønsket ditt, og du må sjå gjennom det.</div><p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p><label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til at alle videoklippa i dette prosjektet og instruksjonen blir sende til Google for denne AI-eksporten, og forstår at det kan bruke kvote eller koste pengar.</span></label></div>
         <div class="field"><label id="description-label" for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" aria-describedby="description-hint" data-lock></textarea><span id="description-hint" class="field-hint"></span></div>
-        <div class="field"><label id="duration-label">Ønskt lengd</label><div class="duration-fields" role="group" aria-labelledby="duration-label"><label for="duration-minutes">Minutt<input id="duration-minutes" type="number" min="0" max="10" step="1" value="0" required data-lock></label><label for="duration-seconds">Sekund<input id="duration-seconds" type="number" min="0" max="59" step="1" value="30" required data-lock></label></div><span class="field-hint">Frå 1 sekund til 10 minutt. Videoen kan ikkje bli lengre enn kjeldematerialet.</span></div>
+        <div class="field"><label id="duration-label">Ønskt lengd</label><div class="duration-presets" role="group" aria-label="Vel kort eller lang video"><button class="button secondary small" type="button" data-duration="30" data-lock aria-pressed="false">Kort · 30 sekund</button><button class="button secondary small" type="button" data-duration="180" data-lock aria-pressed="false">Lang · 3 minutt</button></div><div class="duration-fields" role="group" aria-labelledby="duration-label"><label for="duration-minutes">Minutt<input id="duration-minutes" type="number" min="0" max="10" step="1" value="0" required data-lock></label><label for="duration-seconds">Sekund<input id="duration-seconds" type="number" min="0" max="59" step="1" value="30" required data-lock></label></div><span class="field-hint">Frå 1 sekund til 10 minutt. Videoen kan ikkje bli lengre enn kjeldematerialet.</span></div>
         <div id="duration-warning" class="info-box warning duration-warning" role="status" hidden></div>
         <div class="form-grid"><div class="field"><label for="aspect">Biletformat</label><select id="aspect" data-lock><option value="16:9">Liggjande · 16:9</option><option value="9:16">Ståande · 9:16</option><option value="1:1">Kvadratisk · 1:1</option></select></div><div class="field"><label for="fit">Tilpassing av biletet</label><select id="fit" data-lock><option value="pad">Bevar heile biletet med kantar</option><option value="crop">Beskjer for å fylle formatet</option></select></div><div class="field full"><label for="style">Redigeringsstil</label><select id="style" data-lock><option value="calm">Roleg · mjuke toningar</option><option value="energetic">Energisk · direkte klipp</option><option value="professional">Profesjonell · korte toningar</option></select></div></div>
         <label class="check-field disabled"><input type="checkbox" disabled><span>Legg til undertekstar<br><span class="field-hint">Ikkje tilgjengeleg: transkripsjon er ikkje konfigurert.</span></span></label>
-        <button class="button wide" type="submit" id="render-button">${icons("play")} Lag video</button><p class="render-note">MP4 · H.264 · opptil 720p · 24 bilete/s. Éin videojobb blir behandla om gongen. Innstillingane blir lagra når du startar eksporten.</p><p id="render-error" class="error-inline" role="alert"></p></form>
+        <button class="button wide" type="submit" id="render-button">${icons("play")} Lag video</button><p id="render-help" class="render-help" role="status"></p><p class="render-note">MP4 · H.264 · opptil 720p · 24 bilete/s. Éin videojobb blir behandla om gongen. Innstillingane blir lagra når du startar eksporten.</p><p id="render-error" class="error-inline" role="alert"></p></form>
       </div></section>
     </div><div class="stack"><section class="panel" aria-labelledby="preview-heading"><div class="panel-header"><div class="panel-heading"><span class="section-number">03</span><h2 id="preview-heading">Resultatet ditt</h2></div><span class="muted small">FØREHANDSVISING</span></div><div class="panel-body"><div id="result"></div><div id="job-status" aria-live="polite"></div><div id="history"></div></div></section>
       <section class="panel" aria-labelledby="schedule-heading"><div class="panel-header"><h2 id="schedule-heading">Planlegg neste steg</h2>${icons("calendar")}</div><div class="panel-body"><div id="schedule-placeholder" class="info-box">Lag ein ferdig video før du lagrar ein publiseringsplan. Automatisk publisering er ikkje aktiv.</div><div id="schedule-form-slot"></div></div></section>
@@ -269,6 +301,7 @@ async function editor(id, token) {
   const seconds = Number(settings.duration_seconds) || 30;
   byId("duration-minutes").value = Math.floor(seconds / 60);
   byId("duration-seconds").value = seconds % 60;
+  state.durationPreset = seconds <= 30 ? "30" : seconds === 180 ? "180" : null;
   byId("aspect").value = settings.aspect || "16:9";
   byId("fit").value = settings.fit || "pad";
   byId("style").value = settings.style || "professional";
@@ -278,6 +311,18 @@ async function editor(id, token) {
   byId("edit-mode").addEventListener("change", () => {
     byId("ai-consent").checked = false;
     updateControls();
+  });
+  document.querySelectorAll("[data-duration]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const seconds = Math.min(Number(button.dataset.duration), Math.max(1, Math.floor(state.project.source_duration || 0)));
+      state.durationPreset = button.dataset.duration;
+      byId("duration-minutes").value = Math.floor(seconds / 60);
+      byId("duration-seconds").value = seconds % 60;
+      updateControls();
+    });
+  });
+  ["duration-minutes", "duration-seconds"].forEach((id) => {
+    byId(id).addEventListener("input", () => { state.durationPreset = null; });
   });
   refreshClips();
   updateJob();
@@ -418,6 +463,14 @@ function updateControls() {
   const requested = requestedDuration();
   const source = Number(state.project.source_duration) || 0;
   const max = state.config?.limits?.max_export_seconds || 600;
+  document.querySelectorAll("[data-duration]").forEach((button) => {
+    button.disabled = locked || !state.project.clips.length;
+    const target = source > 0
+      ? Math.min(Number(button.dataset.duration), Math.max(1, Math.floor(source)))
+      : Number(button.dataset.duration);
+    button.textContent = `${button.dataset.duration === "30" ? "Kort" : "Lang"} · ${duration(target)}`;
+    button.setAttribute("aria-pressed", String(state.durationPreset === button.dataset.duration && requested === target));
+  });
   let message = "";
   if (state.project.clips.length && requested > source + 0.01)
     message = `Du ønskjer ${duration(requested)}, men har berre ${duration(source)} kjeldemateriale. Last opp fleire klipp eller vel ei kortare lengd.`;
@@ -434,10 +487,15 @@ function updateControls() {
     Boolean(message) ||
     Boolean(editingModeError()) ||
     !state.config?.ffmpeg_available;
+  byId("render-help").textContent = locked
+    ? "Vent til opplastinga eller videojobben er ferdig."
+    : !state.project.clips.length
+      ? "Last opp minst eitt videoklipp for å starte."
+      : message || editingModeError() || "Innstillingane er klare. Du kan starte videobehandlinga.";
   if (!state.config?.ffmpeg_available)
     inlineError(
       "render-error",
-      "FFmpeg er ikkje tilgjengeleg. Sjå README for installasjon før du behandlar video.",
+      "Videomotoren er ikkje tilgjengeleg. På Render må appen bruke Docker-oppsettet. Køyrer du lokalt, installer FFmpeg som forklart i README.",
     );
 }
 function refreshClips() {
@@ -821,7 +879,7 @@ async function route(focus = true) {
   const hash = location.hash.slice(1) || "heim";
   const [page, id] = hash.split("/");
   // Den interne framsidelenkja skal rulle til ei seksjon utan å miste framsida.
-  if (page === "slik-fungerer-det") {
+  if (page === "slik-fungerer-det" && state.config) {
     home();
     ready();
     requestAnimationFrame(() => byId("slik-fungerer-det")?.scrollIntoView());
@@ -836,7 +894,9 @@ async function route(focus = true) {
   notice.hidden = true;
   loading();
   try {
-    if (page === "heim") home();
+    await loadConfig();
+    if (token !== state.route) return;
+    if (page === "heim" || page === "slik-fungerer-det") home();
     else if (page === "prosjekt") await projects(token);
     else if (page === "editor" && id)
       await editor(decodeURIComponent(id), token);
@@ -866,11 +926,5 @@ document.querySelector(".skip-link").addEventListener("click", (event) => {
   byId("innhald").scrollIntoView({ behavior: "auto" });
 });
 window.addEventListener("hashchange", () => route());
-(async function start() {
-  try {
-    state.config = await api("/config");
-  } catch (error) {
-    tell(error.message, true);
-  }
-  await route(false);
-})();
+// Ein mislukka konfigurasjonsførespurnad kan prøvast igjen frå same feilsida.
+route(false);

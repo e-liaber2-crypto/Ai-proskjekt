@@ -50,7 +50,7 @@ def configured() -> bool:
 def configuration_error() -> str | None:
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
-        return "GEMINI_API_KEY manglar i servermiljøet. Set nøkkelen lokalt og start serveren på nytt, eller vel enkel redigering."
+        return "GEMINI_API_KEY manglar i servermiljøet. Set nøkkelen i Environment på Render eller i lokal .env og start serveren på nytt, eller vel enkel redigering."
     if not key.isascii() or any(ord(char) <= 32 or ord(char) == 127 for char in key):
         return "GEMINI_API_KEY har ugyldige teikn eller mellomrom. Kopier den originale API-nøkkelen til lokal .env og start serveren på nytt. Ikkje del nøkkelen i chat eller Git."
     return None

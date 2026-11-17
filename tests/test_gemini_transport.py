@@ -52,7 +52,10 @@ class GeminiTransportTests(unittest.TestCase):
             source = Path(temporary) / "input.mp4"
             source.write_bytes(b"Local SDK transport fixture")
             options = gemini._http_options()
-            options.httpx_client = httpx.Client(transport=httpx.MockTransport(transport))
+            options.httpx_client = httpx.Client(transport=httpx.MockTransport(transport), trust_env=False)
+            # SDK-et opprettar også ein ubrukt asynkron klient. Han skal heller
+            # ikkje arve proxyar eller andre nettverksinnstillingar frå maskina.
+            options.async_client_args = {"trust_env": False}
             # Ein statisk testverdi blir berre brukt av den lokale mock-transporten.
             client = genai.Client(api_key="offline-test-key", vertexai=False, http_options=options)
             with patch("app.gemini._client", return_value=client), patch(

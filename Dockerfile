@@ -6,6 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY index.html app.js styles.css ./
+RUN ffmpeg -version >/dev/null && ffprobe -version >/dev/null && python -c "from app.main import app"
 RUN useradd --create-home demo && mkdir -p /app/data && chown -R demo:demo /app
 USER demo
+EXPOSE 8000
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

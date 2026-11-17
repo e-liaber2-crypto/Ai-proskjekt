@@ -360,6 +360,34 @@ main {
   color: var(--red);
 }
 
+.hosting-note {
+  margin: 20px clamp(24px, 4vw, 62px) 0;
+  padding: 12px 16px;
+  border: 1px solid #62583c;
+  background: #29271f;
+  border-radius: 8px;
+  color: #e4d8ac;
+  font-size: 0.8rem;
+}
+
+.duration-presets {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.duration-presets button[aria-pressed="true"] {
+  background: #35395f;
+  border-color: var(--blue);
+  color: var(--text);
+}
+
+.render-help {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .noscript {
   padding: 30px;
   color: var(--red);
