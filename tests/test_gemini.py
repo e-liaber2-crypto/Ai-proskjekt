@@ -90,12 +90,17 @@ class FakeModels:
     def __init__(self):
         self.calls = []
         self.error = None
+        self.errors = []
         self.text = json.dumps({"segments": [
             {"clip_id": "clip-a", "start_seconds": 0, "end_seconds": 2, "order": 1},
         ]})
 
     def generate_content(self, **arguments):
         self.calls.append(arguments)
+        if self.errors:
+            error = self.errors.pop(0)
+            if error:
+                raise error
         if self.error:
             raise self.error
         return SimpleNamespace(text=self.text)
@@ -302,12 +307,13 @@ class GeminiSdkTests(NoNetworkCase):
             "message": PROVIDER_PRIVATE_TEXT + TEST_KEY,
             "status": "INTERNAL" if status == 500 else "UNAVAILABLE",
         }})
-        failure = self.assert_sanitized_failure()
+        with patch("app.gemini.time.sleep"):
+            failure = self.assert_sanitized_failure()
         self.assertEqual(failure.code, "unavailable")
         self.assertEqual(failure.http_status, status)
         self.assertEqual(failure.operation, "analysis")
         self.assertIn(str(status), str(failure))
-        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertEqual(len(self.fake.models.calls), gemini.MAX_ANALYSIS_ATTEMPTS if status == 503 else 1)
         self.assertEqual(len(self.fake.files.uploads), 1)
         self.assertEqual(len(self.fake.files.deletes), 1)
         self.assertFalse(self.pending)
@@ -318,9 +324,73 @@ class GeminiSdkTests(NoNetworkCase):
         message = self.assert_generation_server_error(500)
         self.assertIn("intern", message.lower())
 
-    def test_generation_503_reports_overload_without_retry_or_private_details(self):
+    def test_generation_503_stops_after_bounded_retries_without_private_details(self):
         message = self.assert_generation_server_error(503)
         self.assertIn("overbelasta", message.lower())
+        self.assertIn("etter 3 forsøk", message)
+
+    def test_overload_can_recover_without_reuploading_or_changing_the_model(self):
+        overloaded = errors.ServerError(503, {"error": {"message": PROVIDER_PRIVATE_TEXT + TEST_KEY}})
+        self.fake.models.errors = [overloaded, overloaded]
+        stages = []
+        with patch("app.gemini.time.sleep") as wait, patch("app.gemini.uniform", return_value=0):
+            plan = gemini.generate_plan(
+                self.clips[:1], "Vel eit relevant utdrag.", 2, "professional",
+                lambda percent, stage: stages.append((percent, stage)),
+                on_uploaded=self.uploaded, on_deleted=self.deleted, model="chosen-model",
+            )
+        self.assertEqual(len(plan), 1)
+        self.assertEqual([call.args[0] for call in wait.call_args_list], [3, 8])
+        self.assertEqual(len(self.fake.models.calls), 3)
+        self.assertTrue(all(call["model"] == "chosen-model" for call in self.fake.models.calls))
+        self.assertTrue(all(call["contents"] is self.fake.models.calls[0]["contents"] for call in self.fake.models.calls))
+        self.assertEqual(len(self.fake.files.uploads), 1)
+        self.assertEqual(len(self.fake.files.deletes), 1)
+        self.assertFalse(self.pending)
+        self.assertTrue(self.fake.closed)
+        self.assertTrue(any("forsøk 2 av 3" in stage and "Ventar" in stage for _, stage in stages))
+        self.assertTrue(any("forsøk 3 av 3" in stage for _, stage in stages))
+        self.assertNotIn(PROVIDER_PRIVATE_TEXT, str(stages))
+        self.assertNotIn(TEST_KEY, str(stages))
+
+    def test_success_on_second_attempt_does_not_trigger_an_extra_analysis(self):
+        self.fake.models.errors = [errors.ServerError(503, {"error": {"message": "overloaded"}})]
+        with patch("app.gemini.time.sleep") as wait:
+            self.generate(clips=self.clips[:1])
+        self.assertEqual(len(self.fake.models.calls), 2)
+        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(len(self.fake.files.uploads), 1)
+        self.assertEqual(len(self.fake.files.deletes), 1)
+
+    def test_overload_followed_by_quota_or_timeout_stops_immediately(self):
+        overloaded = errors.ServerError(503, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
+        failures = [
+            errors.ClientError(429, {"error": {"message": PROVIDER_PRIVATE_TEXT}}),
+            errors.ClientError(403, {"error": {"message": PROVIDER_PRIVATE_TEXT}}),
+            TimeoutError(PROVIDER_PRIVATE_TEXT),
+        ]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.fake = FakeClient(self.events)
+                self.client_constructor.return_value = self.fake
+                self.fake.models.errors = [overloaded, failure]
+                with patch("app.gemini.time.sleep") as wait:
+                    self.assert_sanitized_failure()
+                self.assertEqual(len(self.fake.models.calls), 2)
+                self.assertEqual(wait.call_count, 1)
+                self.assertEqual(len(self.fake.files.uploads), 1)
+                self.assertEqual(len(self.fake.files.deletes), 1)
+                self.assertFalse(self.pending)
+
+    def test_overload_then_invalid_plan_does_not_repeat_an_already_successful_analysis(self):
+        self.fake.models.errors = [errors.ServerError(503, {"error": {"message": "overloaded"}})]
+        self.fake.models.text = "invalid response"
+        with patch("app.gemini.time.sleep") as wait:
+            failure = self.assert_sanitized_failure()
+        self.assertEqual(failure.code, "invalid_plan")
+        self.assertEqual(len(self.fake.models.calls), 2)
+        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(len(self.fake.files.deletes), 1)
 
     def test_provider_metadata_is_limited_to_http_codes_and_known_operations(self):
         private = PROVIDER_PRIVATE_TEXT + TEST_KEY
@@ -342,12 +412,13 @@ class GeminiSdkTests(NoNetworkCase):
         self.fake.files.delete_error = errors.ClientError(403, {"error": {
             "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "PERMISSION_DENIED",
         }})
-        failure = self.assert_sanitized_failure()
+        with patch("app.gemini.time.sleep"):
+            failure = self.assert_sanitized_failure()
         self.assertEqual(failure.code, "cleanup")
         self.assertEqual(failure.http_status, 503)
         self.assertEqual(failure.operation, "analysis")
         self.assertIn("503", str(failure))
-        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertEqual(len(self.fake.models.calls), gemini.MAX_ANALYSIS_ATTEMPTS)
         self.assertEqual(len(self.fake.files.uploads), 1)
         self.assertEqual(len(self.fake.files.deletes), 1)
         self.assertTrue(self.pending)

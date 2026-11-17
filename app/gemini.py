@@ -1,7 +1,8 @@
 """Videoanalyse med Google sitt offisielle SDK. Ingen automatisk basic-fallback.
 
 Nøklar blir berre brukte av serveren ved klientoppretting, aldri serialiserte.
-Kvar fil blir lasta opp éin gong og modellen blir kalla éin gong per jobb.
+Kvar fil blir lasta opp éin gong. Berre eksplisitt HTTP 503 under analyse
+kan gi opptil to nye forsøk med dei same filreferansane og same modellen.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from random import uniform
 import re
 import time
 from typing import Callable
@@ -27,6 +29,8 @@ MAX_AI_SOURCE_SECONDS = 1800
 MAX_FILE_POLLS = 30
 POLL_INTERVAL_SECONDS = 2
 FILE_READY_TIMEOUT_SECONDS = 120
+ANALYSIS_RETRY_DELAYS = (3, 8)
+MAX_ANALYSIS_ATTEMPTS = len(ANALYSIS_RETRY_DELAYS) + 1
 MIME_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska"}
 FILE_NAME = re.compile(r"files/[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$|files/[a-z0-9]$")
 OPERATIONS = {"upload": "opplasting", "file_processing": "klargjering av video", "analysis": "videoanalyse"}
@@ -316,6 +320,32 @@ def edit_instruction(description: str, duration_seconds: int, style: str, clip_c
             "requirements": requirements, "rules": rules}
 
 
+def _generate_content_with_backoff(client, *, model, contents, config, progress):
+    """Prøv berre avviste 503-analysar på nytt; aldri upload, kvote eller timeout."""
+    for attempt in range(MAX_ANALYSIS_ATTEMPTS):
+        if attempt:
+            progress(28, f"Gemini analyserer videoklippa: forsøk {attempt + 1} av {MAX_ANALYSIS_ATTEMPTS}")
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as error:
+            # Ein transportfeil/timeout kan ha skjedd etter at Google byrja
+            # arbeidet. Ikkje send ein mogleg betalt analyse ein gong til då.
+            if _code(error) != 503:
+                raise
+            if attempt + 1 == MAX_ANALYSIS_ATTEMPTS:
+                raise GeminiError(
+                    f"Google-tenesta er framleis overbelasta eller mellombels utilgjengeleg "
+                    f"under videoanalyse (HTTP 503), etter {MAX_ANALYSIS_ATTEMPTS} forsøk. "
+                    "Klippa ligg framleis i prosjektet. Prøv seinare, eller vel enkel redigering utan AI. "
+                    "Ingen fleire analyseforsøk blir starta automatisk.",
+                    "unavailable", http_status=503, operation="analysis",
+                ) from None
+            delay = ANALYSIS_RETRY_DELAYS[attempt] + uniform(0, 1)
+            progress(28, f"Google er overbelasta (HTTP 503). Ventar {delay:.1f} sekund før "
+                        f"forsøk {attempt + 2} av {MAX_ANALYSIS_ATTEMPTS}; klippa blir ikkje lasta opp på nytt.")
+            time.sleep(delay)
+
+
 def generate_plan(
     clips: list[dict],
     description: str,
@@ -382,7 +412,8 @@ def generate_plan(
         contents.append(types.Part.from_text(text=json.dumps(instruction, ensure_ascii=False)))
         progress(28, "Gemini analyserer videoklippa og lagar ein klippeplan")
         operation = "analysis"
-        response = client.models.generate_content(
+        response = _generate_content_with_backoff(
+            client, progress=progress,
             model=model or model_name(),
             contents=contents,
             config=types.GenerateContentConfig(
