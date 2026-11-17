@@ -332,7 +332,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "Opprydding av tidlegare Google-filer står att. Referansane er bevarte og blir prøvde igjen. "
                     "Gamle referansar utan tilgang som manglar i Google-prosjektet si filliste, blokkerer ikkje nye jobbar."
                     if pending_cleanup else None),
-                "gemini_model": gemini.model_name(), "transcription_available": False,
+                "gemini_model": gemini.model_name(), "analysis_timeout_seconds": gemini.ANALYSIS_TIMEOUT_MS // 1000,
+                "transcription_available": False,
                 "ffmpeg_available": media.tools_available(), "timezone": "Europe/Oslo",
                 "limits": {"max_upload_mb": 200, "max_files": MAX_FILES, "max_clip_seconds": MAX_CLIP_SECONDS,
                            "max_export_seconds": MAX_EXPORT_SECONDS, "max_storage_mb": 2048,

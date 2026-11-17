@@ -29,6 +29,7 @@ MAX_AI_SOURCE_SECONDS = 1800
 MAX_FILE_POLLS = 30
 POLL_INTERVAL_SECONDS = 2
 FILE_READY_TIMEOUT_SECONDS = 120
+ANALYSIS_TIMEOUT_MS = 180_000
 ANALYSIS_RETRY_DELAYS = (3, 8)
 MAX_ANALYSIS_ATTEMPTS = len(ANALYSIS_RETRY_DELAYS) + 1
 MIME_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska"}
@@ -99,7 +100,7 @@ def _safe_error(error: Exception, *, operation: str | None = None) -> GeminiErro
     if status == 404:
         return failure("Google fann ikkje modellen eller ei av videofilene. Kontroller GEMINI_MODEL og at modellen støttar videoanalyse.", "not_found")
     if status in (408, 504) or isinstance(error, (httpx.TimeoutException, TimeoutError)):
-        return failure("Google-analysen nådde tidsgrensa. Jobben er stoppa; han blir ikkje sendt til analyse på nytt automatisk.", "timeout")
+        return failure("Google-analysen nådde ei tidsgrense. Prøv med færre eller kortare klipp, eller vel enkel redigering utan AI. Jobben er stoppa; han blir ikkje sendt til analyse på nytt automatisk.", "timeout")
     if status is not None and status >= 500:
         reason = {
             500: "Google fekk ein intern serverfeil",
@@ -320,6 +321,23 @@ def edit_instruction(description: str, duration_seconds: int, style: str, clip_c
             "requirements": requirements, "rules": rules}
 
 
+def _generation_config(model: str) -> types.GenerateContentConfig:
+    """Bruk ei eiga analysefrist; filopplasting og statusoppslag held sine grenser."""
+    # 3.8 Flash har medium som standard. Low reduserer ventetid og tokenbruk,
+    # medan andre modellar held standarden sin for å unngå ugyldige parametrar.
+    known_flash = model.removeprefix("models/") == DEFAULT_MODEL
+    thinking = types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW) if known_flash else None
+    return types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_json_schema=CutPlan.model_json_schema(),
+        max_output_tokens=4096,
+        thinking_config=thinking,
+        http_options=_http_options(ANALYSIS_TIMEOUT_MS),
+        automatic_continuation=False,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+
+
 def _generate_content_with_backoff(client, *, model, contents, config, progress):
     """Prøv berre avviste 503-analysar på nytt; aldri upload, kvote eller timeout."""
     for attempt in range(MAX_ANALYSIS_ATTEMPTS):
@@ -410,19 +428,13 @@ def generate_plan(
             ])
         instruction = edit_instruction(description, duration_seconds, style, len(clips))
         contents.append(types.Part.from_text(text=json.dumps(instruction, ensure_ascii=False)))
-        progress(28, "Gemini analyserer videoklippa og lagar ein klippeplan")
+        progress(28, f"Gemini analyserer videoklippa og lagar ein klippeplan. Dette forsøket har ei tidsgrense på {ANALYSIS_TIMEOUT_MS // 1000} sekund.")
         operation = "analysis"
+        selected_model = model or model_name()
         response = _generate_content_with_backoff(
             client, progress=progress,
-            model=model or model_name(),
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=CutPlan.model_json_schema(),
-                max_output_tokens=4096,
-                automatic_continuation=False,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
+            model=selected_model, contents=contents,
+            config=_generation_config(selected_model),
         )
         progress(40, "Validerer klippeplanen frå Gemini")
         try:

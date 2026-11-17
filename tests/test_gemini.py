@@ -292,6 +292,27 @@ class GeminiSdkTests(NoNetworkCase):
         self.assertEqual(config.response_mime_type, "application/json")
         self.assertTrue(config.response_json_schema)
 
+    def test_analysis_has_its_own_three_minute_deadline_without_enabling_sdk_retries(self):
+        self.generate(clips=self.clips[:1])
+        analysis = self.fake.models.calls[0]["config"].http_options
+        self.assertEqual(analysis.timeout, 180_000)
+        self.assertEqual(analysis.retry_options.attempts, 1)
+        upload = self.fake.files.uploads[0][1].http_options
+        self.assertEqual(upload.timeout, 120_000)
+        self.assertEqual(self.client_constructor.call_args.kwargs["http_options"].timeout, 60_000)
+
+    def test_default_flash_uses_low_thinking_and_other_models_keep_their_defaults(self):
+        for model, expected in ((gemini.DEFAULT_MODEL, "low"), ("models/" + gemini.DEFAULT_MODEL, "low"), ("different-model", None)):
+            with self.subTest(model=model):
+                config = gemini._generation_config(model)
+                if expected:
+                    self.assertEqual(config.thinking_config.thinking_level.value.lower(), expected)
+                else:
+                    self.assertIsNone(config.thinking_config)
+                self.assertEqual(config.max_output_tokens, 4096)
+                self.assertEqual(config.http_options.timeout, 180_000)
+                self.assertFalse(config.automatic_continuation)
+
     def test_rate_limit_does_not_retry_generation_and_sanitizes_provider_details(self):
         self.fake.models.error = errors.ClientError(429, {"error": {
             "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "RESOURCE_EXHAUSTED",

@@ -37,6 +37,8 @@ class GeminiTransportTests(unittest.TestCase):
                 self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
                 self.assertIn("responseJsonSchema", payload["generationConfig"])
                 self.assertNotIn("temperature", payload["generationConfig"])
+                self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"].lower(), "low")
+                self.assertEqual(request.extensions["timeout"]["read"], 180)
                 self.assertIn("fileData", payload["contents"][0]["parts"][1])
                 return httpx.Response(200, json={"candidates": [{
                     "content": {"role": "model", "parts": [{"text": json.dumps({"segments": [
