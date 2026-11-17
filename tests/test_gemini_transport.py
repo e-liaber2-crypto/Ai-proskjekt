@@ -15,6 +15,7 @@ from app import gemini
 class GeminiTransportTests(unittest.TestCase):
     def test_real_sdk_serializes_upload_analysis_and_cleanup_without_network(self):
         requests = []
+        analysis_options = []
         reserved_name = None
 
         def transport(request):
@@ -37,6 +38,10 @@ class GeminiTransportTests(unittest.TestCase):
                 self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
                 self.assertIn("responseJsonSchema", payload["generationConfig"])
                 self.assertNotIn("temperature", payload["generationConfig"])
+                analysis_options.append({
+                    "thinking": payload["generationConfig"].get("thinkingConfig"),
+                    "timeout": request.extensions.get("timeout"),
+                })
                 self.assertIn("fileData", payload["contents"][0]["parts"][1])
                 return httpx.Response(200, json={"candidates": [{
                     "content": {"role": "model", "parts": [{"text": json.dumps({"segments": [
@@ -68,6 +73,10 @@ class GeminiTransportTests(unittest.TestCase):
             self.assertEqual(plan[0]["duration"], 1)
             self.assertEqual(len(requests), 4)  # Éi upload-økt, éin analyse, éi sletting.
             self.assertEqual(requests[2], ("POST", f"/v1beta/models/{gemini.DEFAULT_MODEL}:generateContent"))
+            thinking = analysis_options[0]["thinking"]
+            # SDK-versjonar kan bruke proto-namnet eller JSON-namnet i denne nested meldinga.
+            self.assertEqual(thinking.get("thinkingLevel", thinking.get("thinking_level", "")).lower(), "low")
+            self.assertEqual(analysis_options[0]["timeout"]["read"], 180)
 
 
 if __name__ == "__main__":
