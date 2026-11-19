@@ -170,8 +170,9 @@ class Store:
 class VideoWorker:
     """Éin jobb om gongen. Køen ligg i databasen, ikkje berre i minnet."""
 
-    def __init__(self, store):
+    def __init__(self, store, *, use_frames=False):
         self.store = store
+        self.use_frames = use_frames
         self.stopping = threading.Event()
         self.wakeup = threading.Event()
         self.thread = threading.Thread(target=self.run, name="video-worker", daemon=True)
@@ -258,14 +259,16 @@ class VideoWorker:
                 reserve = settings.get("basic_fallback") is True
                 started = time.monotonic()
                 try:
-                    progress(2, "Ryddar eventuelle tidlegare Google-filer")
-                    cleanup_deadline = started + gemini.CLEANUP_WAIT_SECONDS if reserve else None
-                    if not self.cleanup_pending(deadline=cleanup_deadline):
-                        raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast eller kontrollerast. Kontroller API-tilgang og nettverk før du prøver igjen.", "cleanup")
+                    if not self.use_frames:
+                        progress(2, "Ryddar eventuelle tidlegare Google-filer")
+                        cleanup_deadline = started + gemini.CLEANUP_WAIT_SECONDS if reserve else None
+                        if not self.cleanup_pending(deadline=cleanup_deadline):
+                            raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast eller kontrollerast. Kontroller API-tilgang og nettverk før du prøver igjen.", "cleanup")
                     plan = gemini.generate_plan(
                         clips, settings["description"], settings["duration_seconds"], settings["style"], progress,
                         on_uploaded=remember_file, on_deleted=forget_file, model=settings.get("gemini_model"),
-                        deadline=started + gemini.RESERVE_WAIT_SECONDS if reserve else None,
+                        deadline=started + gemini.RESERVE_WAIT_SECONDS if reserve and not self.use_frames else None,
+                        use_frames=self.use_frames,
                     )
                 except gemini.GeminiError as error:
                     if not reserve:
@@ -312,7 +315,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     hosting = HostingSettings.from_environment()
     directory = Path(data_dir or os.getenv("DATA_DIR", ROOT / "data")).expanduser().resolve()
     store = Store(directory)
-    worker = VideoWorker(store)
+    worker = VideoWorker(store, use_frames=hosting.on_render)
     mutation_lock = asyncio.Lock()
 
     @asynccontextmanager
@@ -358,7 +361,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "Gamle referansar utan tilgang som manglar i Google-prosjektet si filliste, blokkerer ikkje nye jobbar."
                     if pending_cleanup else None),
                 "gemini_model": gemini.model_name(), "analysis_timeout_seconds": gemini.ANALYSIS_TIMEOUT_MS // 1000,
-                "gemini_reserve_wait_seconds": gemini.RESERVE_WAIT_SECONDS,
+                "gemini_reserve_wait_seconds": gemini.RENDER_ANALYSIS_SECONDS if worker.use_frames else gemini.RESERVE_WAIT_SECONDS,
+                "gemini_input": "frames" if worker.use_frames else "video",
                 "transcription_available": False,
                 "ffmpeg_available": media.tools_available(), "timezone": "Europe/Oslo",
                 "limits": {"max_upload_mb": 200, "max_files": MAX_FILES, "max_clip_seconds": MAX_CLIP_SECONDS,

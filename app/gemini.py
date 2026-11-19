@@ -20,6 +20,7 @@ from . import media
 from .cut_plan import CutPlan, parse_plan
 
 DEFAULT_MODEL = "gemini-3.8-flash"
+RENDER_RESERVE_MODEL = "gemini-3.5-flash-lite"
 MAX_AI_FILES = 10  # Appen si eiga grense, ikkje ein lovnad om Google-kvote.
 MAX_AI_SOURCE_SECONDS = 1800
 MAX_FILE_POLLS = 30
@@ -31,6 +32,9 @@ INLINE_MAX_BYTES = 4 * 1024 * 1024
 PREPARATION_TIMEOUT_SECONDS = 35
 ANALYSIS_FRAME_BUDGET = 48
 RESERVE_WAIT_SECONDS = 45
+RENDER_FRAME_SECONDS = 40
+RENDER_ANALYSIS_SECONDS = 75
+RENDER_FRAME_MAX_BYTES = 2 * 1024 * 1024
 CLEANUP_WAIT_SECONDS = 10
 ANALYSIS_RETRY_DELAYS = (3, 8)
 MAX_ANALYSIS_ATTEMPTS = len(ANALYSIS_RETRY_DELAYS) + 1
@@ -360,15 +364,19 @@ def _generation_config(model: str) -> types.GenerateContentConfig:
     )
 
 
-def _generate_content_with_backoff(client, *, model, contents, config, progress, deadline=None):
+def _generate_content_with_backoff(client, *, model, contents, config, progress, deadline=None, reserve_model=None):
     """Prøv berre avviste 503-analysar på nytt; aldri upload, kvote eller timeout."""
     for attempt in range(MAX_ANALYSIS_ATTEMPTS):
+        active_model = reserve_model if attempt and reserve_model else model
+        active_config = _generation_config(active_model) if active_model != model else config
         if attempt:
-            progress(28, f"Gemini analyserer videoklippa: forsøk {attempt + 1} av {MAX_ANALYSIS_ATTEMPTS}")
+            progress(28, f"Analyserer med {active_model} (forsøk {attempt + 1} av {MAX_ANALYSIS_ATTEMPTS})")
         if deadline is not None:
-            config = config.model_copy(update={"http_options": _http_options(_remaining_ms(deadline, ANALYSIS_TIMEOUT_MS))})
+            active_config = active_config.model_copy(update={
+                "http_options": _http_options(_remaining_ms(deadline, ANALYSIS_TIMEOUT_MS)),
+            })
         try:
-            return client.models.generate_content(model=model, contents=contents, config=config)
+            return client.models.generate_content(model=active_model, contents=contents, config=active_config)
         except Exception as error:
             # Ein transportfeil/timeout kan ha skjedd etter at Google byrja
             # arbeidet. Ikkje send ein mogleg betalt analyse ein gong til då.
@@ -392,6 +400,47 @@ def _generate_content_with_backoff(client, *, model, contents, config, progress,
 
 def _clip_metadata(clip: dict) -> types.Part:
     return types.Part.from_text(text=json.dumps({"clip_id": clip["id"], "duration_seconds": clip["duration"]}))
+
+
+def _frame_video_parts(clips: list[dict], progress, job_deadline: float | None) -> list[types.Part]:
+    """Klargjer minst eitt bilete per klipp før vi brukar tid på fleire bilete."""
+    deadline = time.monotonic() + RENDER_FRAME_SECONDS
+    if job_deadline is not None:
+        deadline = min(deadline, job_deadline)
+    by_clip = [[_clip_metadata(clip)] for clip in clips]
+    bytes_left = RENDER_FRAME_MAX_BYTES
+    fractions = (0.0, 0.45, 0.8)
+    with TemporaryDirectory(prefix="klipp-bilete-") as temporary:
+        destination = Path(temporary) / "frame.jpg"
+        for pass_index, fraction in enumerate(fractions):
+            for index, clip in enumerate(clips):
+                seconds = round(clip["duration"] * fraction, 3)
+                if fraction and clip["duration"] < 0.5:
+                    continue
+                completed = pass_index * len(clips) + index
+                progress(3 + int(20 * completed / (len(fractions) * len(clips))),
+                         f"Hentar bilete frå klipp {index + 1} av {len(clips)}")
+                try:
+                    frame_timeout = _remaining_ms(deadline, 8_000) / 1000
+                    destination.unlink(missing_ok=True)
+                    media.make_analysis_frame(clip, seconds, destination, frame_timeout)
+                    size = destination.stat().st_size
+                    if not 0 < size <= bytes_left:
+                        raise media.MediaError("Bileta er for store til å sendast direkte.")
+                    data = destination.read_bytes()
+                except (media.MediaError, OSError, TimeoutError):
+                    if fraction == 0:
+                        raise GeminiError(
+                            f"Appen kunne ikkje klargjere eit bilete frå klipp {index + 1} til Gemini.",
+                            "frame_preparation",
+                        ) from None
+                    continue
+                bytes_left -= size
+                by_clip[index].extend([
+                    types.Part.from_text(text=json.dumps({"sample_time_seconds": seconds})),
+                    types.Part.from_bytes(data=data, mime_type="image/jpeg"),
+                ])
+    return [part for parts in by_clip for part in parts]
 
 
 def _inline_video_parts(clips, fps, progress, job_deadline) -> list[types.Part]:
@@ -430,8 +479,9 @@ def generate_plan(
     on_deleted: Callable[[str], None] | None = None,
     model: str | None = None,
     deadline: float | None = None,
+    use_frames: bool = False,
 ) -> list[dict]:
-    """Send korte videoar direkte. Bruk File API når analysekopiar ikkje passar."""
+    """Bruk tidsmerkte bilete på Render og video med lyd lokalt."""
     if not 1 <= len(clips) <= MAX_AI_FILES:
         raise GeminiError("AI-modus støttar mellom eitt og ti videoklipp per jobb.", "limits")
     source_seconds = sum(clip["duration"] for clip in clips)
@@ -441,7 +491,7 @@ def generate_plan(
         raise GeminiError("Skriv kva du ønskjer at Gemini skal lage før du startar AI-redigering.", "instruction")
     requirements = editorial_requirements(description)
     # Same førehandskontroll som enkel modus, utan å sende noko til Google.
-    media.build_plan(clips, duration_seconds, style)
+    baseline_plan = media.build_plan(clips, duration_seconds, style)
     fps = min(1.0, ANALYSIS_FRAME_BUDGET / source_seconds)
     client = None
     remote_names = []
@@ -451,7 +501,11 @@ def generate_plan(
     try:
         client = _client()
         contents = []
-        if source_seconds <= INLINE_SOURCE_SECONDS:
+        if use_frames:
+            contents = _frame_video_parts(clips, progress, deadline)
+            analysis_deadline = time.monotonic() + RENDER_ANALYSIS_SECONDS
+            deadline = min(analysis_deadline, deadline) if deadline is not None else analysis_deadline
+        elif source_seconds <= INLINE_SOURCE_SECONDS:
             try:
                 contents = _inline_video_parts(clips, fps, progress, deadline)
             except (media.MediaError, OSError, TimeoutError):
@@ -496,14 +550,30 @@ def generate_plan(
                 ),
             ])
         instruction = edit_instruction(description, duration_seconds, style, len(clips))
+        if use_frames:
+            instruction["rules"][0] = (
+                "Analyze the timestamped images from each clip and use the visible content and the user's "
+                "instruction to choose excerpts and playback order. Treat the images as samples. "
+                "Audio is not provided, so do not infer speech or sounds."
+            )
+            instruction["rules"][3] = (
+                "Select visually strong excerpts. You may use the suggested lengths, which already sum to "
+                "the target duration, and choose each start time and playback order yourself."
+            )
+            instruction["suggested_lengths"] = [
+                {"clip_id": segment["clip_id"], "duration_seconds": round(segment["duration"], 6)}
+                for segment in baseline_plan
+            ]
         contents.append(types.Part.from_text(text=json.dumps(instruction, ensure_ascii=False)))
         progress(28, "Gemini analyserer klippa og lagar ein klippeplan")
         operation = "analysis"
         selected_model = model or model_name()
+        reserve_model = (RENDER_RESERVE_MODEL
+                         if use_frames and selected_model.removeprefix("models/") == DEFAULT_MODEL else None)
         response = _generate_content_with_backoff(
             client, progress=progress,
             model=selected_model, contents=contents,
-            config=_generation_config(selected_model), deadline=deadline,
+            config=_generation_config(selected_model), deadline=deadline, reserve_model=reserve_model,
         )
         progress(40, "Validerer klippeplanen frå Gemini")
         try:

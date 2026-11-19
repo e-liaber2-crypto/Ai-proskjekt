@@ -124,7 +124,7 @@ function updateEnvironment() {
   document.querySelector(".sidebar-bottom p").textContent = hosted
     ? "Delt skuleprosjekt · Ingen betaling."
     : "Skuleprosjekt · Ingen betaling.";
-  document.querySelector(".app-footer span:last-child").textContent = "Video blir behandla på serveren. Gemini sender klipp til Google etter samtykke.";
+  document.querySelector(".app-footer span:last-child").textContent = "Video blir behandla på serveren. Gemini får analysemateriale etter samtykke.";
   const note = byId("hosting-note");
   note.hidden = !state.config?.hosting?.ephemeral_storage;
   note.textContent = "Render-demo · Mellombels lagring: prosjekt og videoar kan forsvinne ved dvale, omstart eller ny deploy. Last ned videoar du vil ta vare på. Alle med demo-passordet ser dei same prosjekta.";
@@ -286,9 +286,11 @@ async function editor(id, token) {
         <div class="field"><label for="edit-mode">Redigeringsmodus</label><select id="edit-mode" name="mode" aria-describedby="mode-note" data-lock><option value="basic">Enkel redigering utan AI</option><option value="gemini">AI-redigering med Gemini</option></select><span id="mode-note" class="field-hint"></span></div>
         <div id="basic-mode-info" class="info-box settings-note"><strong>Enkel modus, utan AI.</strong> Vi bruker starten av kvart klipp proporsjonalt, i opplastingsrekkefølgje. Roleg og profesjonell stil gir mjuke inn- og uttoningar; energisk stil bruker direkte klipp. Ingen videofiler blir sende til ei AI-teneste.</div>
         <div id="gemini-mode-info" class="gemini-settings" hidden>
-          <div class="info-box warning settings-note">Gemini får video og lyd frå alle klippa, saman med instruksjonen. For korte prosjekt sender appen mindre analysekopiar når det er mogleg. Eksporten brukar originalklippa. Ved overbelasting (HTTP 503) kan analysen bli prøvd opptil tre gonger. Sjå gjennom den ferdige videoen.</div>
+          <div class="info-box warning settings-note">${state.config?.gemini_input === "frames"
+            ? "Gemini får bilete frå kvart klipp og brukar dei til å velje utdrag og rekkjefølgje. Ved overbelasting kan ein annan Gemini-modell prøve. Eksporten brukar dei valde utdraga frå originalklippa, med lyd."
+            : "Gemini får video og lyd frå alle klippa og brukar instruksjonen til å velje utdrag. For korte prosjekt sender appen mindre analysekopiar. Eksporten brukar originalklippa."}</div>
           <p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p>
-          <label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til å sende klippa eller analysekopiar og instruksjonen til Google for denne eksporten, med opptil tre forsøk ved overbelasting. Dette kan bruke kvote eller koste pengar.</span></label>
+          <label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til å sende ${state.config?.gemini_input === "frames" ? "bilete frå klippa" : "klippa eller analysekopiar"} og instruksjonen til Google for denne eksporten, med opptil tre forsøk ved overbelasting. Dette kan bruke kvote eller koste pengar.</span></label>
           <p id="ai-fallback-hint" class="field-hint"></p>
         </div>
         <div class="field"><label id="description-label" for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" aria-describedby="description-hint" data-lock></textarea><span id="description-hint" class="field-hint"></span></div>
@@ -419,7 +421,7 @@ function editingModeError() {
     return state.config?.gemini_configuration_error || "Gemini er ikkje konfigurert på serveren. Sjå README for oppsett, eller vel enkel redigering utan AI. Ingen AI-førespurnad er send.";
   const maxFiles = state.config?.limits?.max_ai_files || 10;
   if (state.project.clips.length > maxFiles)
-    return `Denne appen tillèt opptil ${maxFiles} klipp per AI-jobb. Alle ${state.project.clips.length} prosjektklippa ville blitt sende. Fjern nokre klipp eller vel enkel modus.`;
+    return `Denne appen tillèt opptil ${maxFiles} klipp per AI-jobb. Prosjektet har ${state.project.clips.length}. Fjern nokre klipp eller vel enkel modus.`;
   const maxSource = state.config?.limits?.max_ai_source_seconds || 1800;
   if (state.project.source_duration > maxSource)
     return `AI-modusen i denne appen tillèt opptil ${duration(maxSource)} kjeldemateriale totalt, men prosjektet har ${duration(state.project.source_duration)}. Fjern nokre klipp eller vel enkel modus.`;
@@ -436,7 +438,7 @@ function updateEditingMode(locked) {
   byId("basic-mode-info").hidden = gemini;
   byId("gemini-mode-info").hidden = !gemini;
   byId("mode-note").textContent = gemini
-    ? "Gemini analyserer video og instruksjon. Valet krev oppsett på serveren og nytt samtykke for kvar eksport."
+    ? "Gemini lagar ein klippeplan frå materialet og instruksjonen. Du må samtykkje for kvar eksport."
     : `Lokal klipping og samansetjing, utan AI. Opptil ${state.config?.limits?.max_files || 12} videoklipp per prosjekt.`;
   byId("gemini-availability").textContent = state.config?.ai_available
     ? `API-nøkkel er konfigurert på serveren. Modell: ${state.config.gemini_model || "vald på serveren"}. Dette stadfestar ikkje at API-tilgangen eller kvoten er testa.`
@@ -449,8 +451,9 @@ function updateEditingMode(locked) {
   byId("ai-consent").required = gemini;
   byId("ai-consent").disabled = locked || !gemini || !state.config?.ai_available;
   const reserveWait = state.config?.gemini_reserve_wait_seconds || 45;
+  const waitLabel = state.config?.gemini_input === "frames" ? "etter at bileta er klare" : "for AI-stega";
   byId("ai-fallback-hint").textContent =
-    `Om Gemini feilar eller brukar meir enn om lag ${duration(reserveWait)}, held appen fram med enkel klipping i vald lengd, format og stil. Instruksjonen blir berre brukt ved AI-redigering.`;
+    `Appen ventar om lag ${duration(reserveWait)} ${waitLabel}. Ved feil held han fram med enkel klipping, og resultatet blir merkt som reserve.`;
   byId("description").required = gemini;
   byId("description-label").textContent = gemini
     ? "Kva skal Gemini lage? (påkravd)"
@@ -619,7 +622,7 @@ function updateJob() {
   if (active(job) && jobMode(job) === "gemini") {
     const elapsed = Math.max(0, (Date.now() - new Date(job.created_at).getTime()) / 1000);
     const wait = job.settings?.basic_fallback
-      ? `AI-stega får om lag ${duration(state.config?.gemini_reserve_wait_seconds || 45)} før appen går vidare ved tidsavbrot.`
+      ? `Gemini får om lag ${duration(state.config?.gemini_reserve_wait_seconds || 45)}${state.config?.gemini_input === "frames" ? " etter at bileta er klare" : " til AI-stega"}.`
       : `Eitt analyseforsøk har ei tidsgrense på ${duration(state.config?.analysis_timeout_seconds || 180)}.`;
     box.append(element("p", "field-hint",
       `Jobben har gått i ${duration(elapsed)}. ${wait}`));

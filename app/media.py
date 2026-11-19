@@ -153,6 +153,23 @@ def probe(path: Path) -> dict:
         raise MediaError("Kunne ikkje lese gyldige videometadata frå fila.") from exc
 
 
+def make_analysis_frame(clip: dict, seconds: float, destination: Path, timeout: float) -> None:
+    """Hent eitt lite JPEG-bilete med søk i kjeldefila."""
+    _run(
+        [
+            _binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-threads", "1", "-filter_threads", "1",
+            "-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm",
+            "-ss", f"{seconds:.6f}", "-i", str(_local_file(clip["path"])),
+            "-map", "0:v:0", "-frames:v", "1", "-an",
+            "-vf", "scale=384:384:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "mjpeg", "-threads", "1", "-q:v", "5", "-update", "1", str(destination),
+        ],
+        timeout=timeout,
+        failure="Kunne ikkje hente eit bilete frå videoen.",
+    )
+
+
 def make_analysis_copy(clip: dict, destination: Path, timeout: float) -> None:
     """Lag ei lita MP4-fil som bevarer tidslinja og lyden for videoanalysen."""
     _run(
