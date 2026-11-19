@@ -136,12 +136,13 @@ function badge(job) {
     statusNames[job?.status] || "Ikkje eksportert",
   );
 }
-// Jobbinnstillingane er fasiten, sjølv om brukaren seinare endrar skjemaet.
-// Eksportar frå før Gemini-støtta har ikkje eit mode-felt og er enkle eksportar.
+// Reserve er eit eige utfall. Jobbinnstillingane bevarer det brukaren bestilte.
 function jobMode(job) {
+  if (job?.fallback_reason) return "fallback";
   return (job?.settings?.mode || job?.mode) === "gemini" ? "gemini" : "basic";
 }
 function modeName(mode) {
+  if (mode === "fallback") return "Reserve · enkel redigering utan AI";
   return mode === "gemini"
     ? "AI-redigering med Gemini"
     : "Enkel redigering utan AI";
@@ -284,7 +285,13 @@ async function editor(id, token) {
         <form id="settings-form">
         <div class="field"><label for="edit-mode">Redigeringsmodus</label><select id="edit-mode" name="mode" aria-describedby="mode-note" data-lock><option value="basic">Enkel redigering utan AI</option><option value="gemini">AI-redigering med Gemini</option></select><span id="mode-note" class="field-hint"></span></div>
         <div id="basic-mode-info" class="info-box settings-note"><strong>Enkel modus, utan AI.</strong> Vi bruker starten av kvart klipp proporsjonalt, i opplastingsrekkefølgje. Roleg og profesjonell stil gir mjuke inn- og uttoningar; energisk stil bruker direkte klipp. Ingen videofiler blir sende til ei AI-teneste.</div>
-        <div id="gemini-mode-info" class="gemini-settings" hidden><div class="info-box warning settings-note"><strong>Alle klippa i prosjektet blir sende til Google.</strong> Gemini analyserer sjølve videoane og tekstinstruksjonen for å foreslå utdrag og rekkjefølgje. Dette kan koste pengar eller bruke API-kvote. Ved overbelasting (HTTP 503) blir analysen prøvd opptil tre gonger med ventetid mellom forsøka. Eitt analyseforsøk kan ta opptil tre minutt. Klippeplanen blir kontrollert før FFmpeg lagar videofila lokalt. Resultatet kan avvike frå ønsket ditt, og du må sjå gjennom det.</div><p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p><label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til at alle videoklippa i dette prosjektet og instruksjonen blir sende til Google for denne AI-eksporten, inkludert opptil tre analyseforsøk ved HTTP 503, og forstår at det kan bruke kvote eller koste pengar.</span></label></div>
+        <div id="gemini-mode-info" class="gemini-settings" hidden>
+          <div class="info-box warning settings-note">Gemini får video og lyd frå alle klippa, saman med instruksjonen. For korte prosjekt sender appen mindre analysekopiar når det er mogleg. Eksporten brukar originalklippa. Ved overbelasting (HTTP 503) kan analysen bli prøvd opptil tre gonger. Sjå gjennom den ferdige videoen.</div>
+          <p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p>
+          <label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til å sende klippa eller analysekopiar og instruksjonen til Google for denne eksporten, med opptil tre forsøk ved overbelasting. Dette kan bruke kvote eller koste pengar.</span></label>
+          <label class="check-field ai-consent-field"><input id="ai-fallback" type="checkbox" aria-describedby="ai-fallback-hint" data-lock><span>Fullfør med enkel redigering om Gemini feilar</span></label>
+          <p id="ai-fallback-hint" class="field-hint"></p>
+        </div>
         <div class="field"><label id="description-label" for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" aria-describedby="description-hint" data-lock></textarea><span id="description-hint" class="field-hint"></span></div>
         <div class="field"><label id="duration-label">Ønskt lengd</label><div class="duration-presets" role="group" aria-label="Vel kort eller lang video"><button class="button secondary small" type="button" data-duration="30" data-lock aria-pressed="false">Kort · 30 sekund</button><button class="button secondary small" type="button" data-duration="180" data-lock aria-pressed="false">Lang · 3 minutt</button></div><div class="duration-fields" role="group" aria-labelledby="duration-label"><label for="duration-minutes">Minutt<input id="duration-minutes" type="number" min="0" max="10" step="1" value="0" required data-lock></label><label for="duration-seconds">Sekund<input id="duration-seconds" type="number" min="0" max="59" step="1" value="30" required data-lock></label></div><span class="field-hint">Frå 1 sekund til 10 minutt. Videoen kan ikkje bli lengre enn kjeldematerialet.</span></div>
         <div id="duration-warning" class="info-box warning duration-warning" role="status" hidden></div>
@@ -308,6 +315,7 @@ async function editor(id, token) {
   byId("edit-mode").value = settings.mode === "gemini" ? "gemini" : "basic";
   // Gamalt samtykke frå ei lagra jobb er aldri samtykke til ein ny eksport.
   byId("ai-consent").checked = false;
+  byId("ai-fallback").checked = settings.basic_fallback === true;
   byId("edit-mode").addEventListener("change", () => {
     byId("ai-consent").checked = false;
     updateControls();
@@ -362,6 +370,8 @@ async function editor(id, token) {
       mode: byId("edit-mode").value,
       ai_consent:
         byId("edit-mode").value === "gemini" && byId("ai-consent").checked,
+      basic_fallback:
+        byId("edit-mode").value === "gemini" && byId("ai-fallback").checked,
     };
     if (state.uploading || state.submitting || active(state.latest)) return;
     const modeError = editingModeError();
@@ -442,6 +452,10 @@ function updateEditingMode(locked) {
   byId("gemini-validation").textContent = locked ? "" : editingModeError();
   byId("ai-consent").required = gemini;
   byId("ai-consent").disabled = locked || !gemini || !state.config?.ai_available;
+  byId("ai-fallback").disabled = locked || !gemini;
+  const reserveWait = state.config?.gemini_reserve_wait_seconds || 90;
+  byId("ai-fallback-hint").textContent =
+    `Gje AI-stega opptil om lag ${duration(reserveWait)}. Ved feil brukar appen enkel klipping med vald lengd, format og stil. Instruksjonen blir berre brukt ved AI-redigering.`;
   byId("description").required = gemini;
   byId("description-label").textContent = gemini
     ? "Kva skal Gemini lage? (påkravd)"
@@ -606,9 +620,18 @@ function updateJob() {
   box.append(element("p", "job-stage", job.stage || statusNames[job.status]));
   if (active(job) && jobMode(job) === "gemini") {
     const elapsed = Math.max(0, (Date.now() - new Date(job.created_at).getTime()) / 1000);
-    const limit = state.config?.analysis_timeout_seconds || 180;
+    const wait = job.settings?.basic_fallback
+      ? `Med reserve får AI-stega om lag ${duration(state.config?.gemini_reserve_wait_seconds || 90)}.`
+      : `Eitt analyseforsøk har ei tidsgrense på ${duration(state.config?.analysis_timeout_seconds || 180)}.`;
     box.append(element("p", "field-hint",
-      `Jobben har gått i ${duration(elapsed)}. Eitt analyseforsøk har ei tidsgrense på ${duration(limit)}. Statusen blir oppdatert medan du ventar.`));
+      `Jobben har gått i ${duration(elapsed)}. ${wait}`));
+  }
+  if (job.fallback_reason) {
+    const reason = ["timeout", "file_timeout"].includes(job.fallback_reason)
+      ? "Gemini nådde tidsgrensa."
+      : "Gemini kunne ikkje fullføre analysen.";
+    box.append(element("p", "field-hint",
+      `${reason} Enkel redigering brukar klippa i opplastingsrekkjefølgje.`));
   }
   if (job.status === "failed")
     box.append(

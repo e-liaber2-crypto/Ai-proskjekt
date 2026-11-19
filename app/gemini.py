@@ -1,9 +1,4 @@
-"""Videoanalyse med Google sitt offisielle SDK. Ingen automatisk basic-fallback.
-
-Nøklar blir berre brukte av serveren ved klientoppretting, aldri serialiserte.
-Kvar fil blir lasta opp éin gong. Berre eksplisitt HTTP 503 under analyse
-kan gi opptil to nye forsøk med dei same filreferansane og same modellen.
-"""
+"""Videoanalyse med Google sitt offisielle SDK og validering av klippeplanen."""
 
 from __future__ import annotations
 
@@ -12,6 +7,7 @@ import os
 from pathlib import Path
 from random import uniform
 import re
+from tempfile import TemporaryDirectory
 import time
 from typing import Callable
 from uuid import uuid4
@@ -30,6 +26,12 @@ MAX_FILE_POLLS = 30
 POLL_INTERVAL_SECONDS = 2
 FILE_READY_TIMEOUT_SECONDS = 120
 ANALYSIS_TIMEOUT_MS = 180_000
+INLINE_SOURCE_SECONDS = 60
+INLINE_MAX_BYTES = 4 * 1024 * 1024
+PREPARATION_TIMEOUT_SECONDS = 35
+ANALYSIS_FRAME_BUDGET = 48
+RESERVE_WAIT_SECONDS = 90
+CLEANUP_WAIT_SECONDS = 10
 ANALYSIS_RETRY_DELAYS = (3, 8)
 MAX_ANALYSIS_ATTEMPTS = len(ANALYSIS_RETRY_DELAYS) + 1
 MIME_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska"}
@@ -74,6 +76,15 @@ def _http_options(timeout: int = 60_000) -> types.HttpOptions:
     )
 
 
+def _remaining_ms(deadline: float | None, limit_ms: int) -> int:
+    if deadline is None:
+        return limit_ms
+    remaining = int((deadline - time.monotonic()) * 1000)
+    if remaining < 1:
+        raise TimeoutError()
+    return min(remaining, limit_ms)
+
+
 def _client():
     error = configuration_error()
     if error:
@@ -100,7 +111,8 @@ def _safe_error(error: Exception, *, operation: str | None = None) -> GeminiErro
     if status == 404:
         return failure("Google fann ikkje modellen eller ei av videofilene. Kontroller GEMINI_MODEL og at modellen støttar videoanalyse.", "not_found")
     if status in (408, 504) or isinstance(error, (httpx.TimeoutException, TimeoutError)):
-        return failure("Google-analysen nådde ei tidsgrense. Prøv med færre eller kortare klipp, eller vel enkel redigering utan AI. Jobben er stoppa; han blir ikkje sendt til analyse på nytt automatisk.", "timeout")
+        step = OPERATIONS.get(operation, "videoanalysen")
+        return failure(f"Tidsgrensa vart nådd under {step} hos Google. Prøv med færre eller kortare klipp, eller vel enkel redigering utan AI. Ingen ny analyse blir starta automatisk.", "timeout")
     if status is not None and status >= 500:
         reason = {
             500: "Google fekk ein intern serverfeil",
@@ -120,13 +132,13 @@ def _transient(error: Exception) -> bool:
     return _code(error) in (408, 429, 500, 502, 503, 504) or isinstance(error, (httpx.TransportError, TimeoutError))
 
 
-def _file_absent_from_project(client, name: str) -> bool:
+def _file_absent_from_project(client, name: str, deadline: float | None = None) -> bool:
     """Fråvær er berre stadfesta etter ei fullført, avgrensa filliste."""
     try:
         files = client.files.list(config=types.ListFilesConfig(
-            page_size=100, http_options=_http_options(10_000)))
+            page_size=100, http_options=_http_options(_remaining_ms(deadline, 10_000))))
         for index, file in enumerate(files):
-            if file.name == name or index >= 999:
+            if file.name == name or index >= 999 or (deadline is not None and time.monotonic() >= deadline):
                 return False
         return True
     except Exception:
@@ -134,7 +146,8 @@ def _file_absent_from_project(client, name: str) -> bool:
 
 
 def _delete_files(client, names: list[str], on_deleted: Callable[[str], None] | None,
-                  on_inaccessible: Callable[[str], None] | None = None) -> list[str]:
+                  on_inaccessible: Callable[[str], None] | None = None,
+                  *, deadline: float | None = None) -> list[str]:
     remaining = []
     for name in dict.fromkeys(names):
         if not FILE_NAME.fullmatch(name):
@@ -142,18 +155,22 @@ def _delete_files(client, names: list[str], on_deleted: Callable[[str], None] | 
             continue
         removed = False
         for attempt in range(2):
+            if deadline is not None and deadline - time.monotonic() < 0.001:
+                break
             try:
-                client.files.delete(name=name, config=types.DeleteFileConfig(http_options=_http_options(10_000)))
+                options = _http_options(_remaining_ms(deadline, 10_000))
+                client.files.delete(name=name, config=types.DeleteFileConfig(http_options=options))
                 removed = True
             except Exception as error:
                 if _code(error) == 404:
                     removed = True
                 elif (_code(error) == 403 and on_inaccessible is not None
-                      and _file_absent_from_project(client, name)):
+                      and _file_absent_from_project(client, name, deadline)):
                     # Kan vere frå ein annan API-konto eller aldri ha blitt oppretta.
                     # Behald referansen: dette stadfestar IKKJE sletting.
                     on_inaccessible(name)
-                elif attempt == 0 and _transient(error):
+                elif (attempt == 0 and _transient(error)
+                      and (deadline is None or time.monotonic() + 1 < deadline)):
                     time.sleep(1)
                     continue
             break
@@ -169,14 +186,15 @@ def _delete_files(client, names: list[str], on_deleted: Callable[[str], None] | 
 
 
 def cleanup_files(names: list[str], on_deleted: Callable[[str], None] | None = None,
-                  *, on_inaccessible: Callable[[str], None] | None = None) -> list[str]:
+                  *, on_inaccessible: Callable[[str], None] | None = None,
+                  deadline: float | None = None) -> list[str]:
     """Prøv berre sletting av tidlegare eigne filer, aldri opplasting eller analyse."""
     if not names or not configured():
         return list(names)
     client = None
     try:
         client = _client()
-        return _delete_files(client, names, on_deleted, on_inaccessible)
+        return _delete_files(client, names, on_deleted, on_inaccessible, deadline=deadline)
     except Exception:
         return list(names)
     finally:
@@ -187,8 +205,10 @@ def cleanup_files(names: list[str], on_deleted: Callable[[str], None] | None = N
                 pass
 
 
-def _wait_for_file(client, uploaded):
+def _wait_for_file(client, uploaded, job_deadline: float | None = None):
     deadline = time.monotonic() + FILE_READY_TIMEOUT_SECONDS
+    if job_deadline is not None:
+        deadline = min(deadline, job_deadline)
     current = uploaded
     for attempt in range(MAX_FILE_POLLS + 1):
         state = getattr(current.state, "name", current.state)
@@ -198,10 +218,12 @@ def _wait_for_file(client, uploaded):
             raise GeminiError("Google kunne ikkje klargjere eit av videoklippa. Prøv eit anna klipp eller eit anna videoformat.", "file_failed")
         if state != "PROCESSING":
             raise GeminiError("Google returnerte ein ukjend filstatus. Analysen er stoppa.", "file_state")
-        if attempt == MAX_FILE_POLLS or time.monotonic() >= deadline:
+        remaining_seconds = deadline - time.monotonic()
+        if attempt == MAX_FILE_POLLS or remaining_seconds <= POLL_INTERVAL_SECONDS:
             raise GeminiError("Google brukte for lang tid på å klargjere videoen. Analysen er stoppa utan ny opplasting.", "file_timeout")
         time.sleep(POLL_INTERVAL_SECONDS)
-        current = client.files.get(name=uploaded.name, config=types.GetFileConfig(http_options=_http_options(10_000)))
+        options = _http_options(_remaining_ms(deadline, 10_000))
+        current = client.files.get(name=uploaded.name, config=types.GetFileConfig(http_options=options))
     raise GeminiError("Videoen vart ikkje klar innan tidsgrensa.", "file_timeout")
 
 
@@ -338,11 +360,13 @@ def _generation_config(model: str) -> types.GenerateContentConfig:
     )
 
 
-def _generate_content_with_backoff(client, *, model, contents, config, progress):
+def _generate_content_with_backoff(client, *, model, contents, config, progress, deadline=None):
     """Prøv berre avviste 503-analysar på nytt; aldri upload, kvote eller timeout."""
     for attempt in range(MAX_ANALYSIS_ATTEMPTS):
         if attempt:
             progress(28, f"Gemini analyserer videoklippa: forsøk {attempt + 1} av {MAX_ANALYSIS_ATTEMPTS}")
+        if deadline is not None:
+            config = config.model_copy(update={"http_options": _http_options(_remaining_ms(deadline, ANALYSIS_TIMEOUT_MS))})
         try:
             return client.models.generate_content(model=model, contents=contents, config=config)
         except Exception as error:
@@ -359,9 +383,40 @@ def _generate_content_with_backoff(client, *, model, contents, config, progress)
                     "unavailable", http_status=503, operation="analysis",
                 ) from None
             delay = ANALYSIS_RETRY_DELAYS[attempt] + uniform(0, 1)
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise TimeoutError() from None
             progress(28, f"Google er overbelasta (HTTP 503). Ventar {delay:.1f} sekund før "
-                        f"forsøk {attempt + 2} av {MAX_ANALYSIS_ATTEMPTS}; klippa blir ikkje lasta opp på nytt.")
+                        f"forsøk {attempt + 2} av {MAX_ANALYSIS_ATTEMPTS}.")
             time.sleep(delay)
+
+
+def _clip_metadata(clip: dict) -> types.Part:
+    return types.Part.from_text(text=json.dumps({"clip_id": clip["id"], "duration_seconds": clip["duration"]}))
+
+
+def _inline_video_parts(clips, fps, progress, job_deadline) -> list[types.Part]:
+    deadline = time.monotonic() + PREPARATION_TIMEOUT_SECONDS
+    if job_deadline is not None:
+        deadline = min(deadline, job_deadline)
+    parts = []
+    bytes_left = INLINE_MAX_BYTES
+    with TemporaryDirectory(prefix="klipp-analyse-") as temporary:
+        for index, clip in enumerate(clips):
+            progress(3 + int(20 * index / len(clips)), f"Lagar ei lita analysekopi av klipp {index + 1} av {len(clips)}")
+            destination = Path(temporary) / f"clip-{index}.mp4"
+            media.make_analysis_copy(clip, destination, _remaining_ms(deadline, PREPARATION_TIMEOUT_SECONDS * 1000) / 1000)
+            size = destination.stat().st_size
+            if not 0 < size <= bytes_left:
+                raise media.MediaError("Analysekopiane er for store til å sendast direkte.")
+            bytes_left -= size
+            parts.extend([
+                _clip_metadata(clip),
+                types.Part(
+                    inline_data=types.Blob(data=destination.read_bytes(), mime_type="video/mp4"),
+                    video_metadata=types.VideoMetadata(fps=fps),
+                ),
+            ])
+    return parts
 
 
 def generate_plan(
@@ -374,17 +429,20 @@ def generate_plan(
     on_uploaded: Callable[[str], None] | None = None,
     on_deleted: Callable[[str], None] | None = None,
     model: str | None = None,
+    deadline: float | None = None,
 ) -> list[dict]:
-    """Send klippa til Google, valider svaret og slett leverandørfilene i finally."""
+    """Send korte videoar direkte. Bruk File API når analysekopiar ikkje passar."""
     if not 1 <= len(clips) <= MAX_AI_FILES:
         raise GeminiError("AI-modus støttar mellom eitt og ti videoklipp per jobb.", "limits")
-    if sum(clip["duration"] for clip in clips) > MAX_AI_SOURCE_SECONDS:
+    source_seconds = sum(clip["duration"] for clip in clips)
+    if source_seconds > MAX_AI_SOURCE_SECONDS:
         raise GeminiError("AI-modus støttar høgst 30 minutt samla kjeldemateriale per jobb.", "limits")
     if not description.strip():
         raise GeminiError("Skriv kva du ønskjer at Gemini skal lage før du startar AI-redigering.", "instruction")
     requirements = editorial_requirements(description)
     # Same førehandskontroll som enkel modus, utan å sende noko til Google.
     media.build_plan(clips, duration_seconds, style)
+    fps = min(1.0, ANALYSIS_FRAME_BUDGET / source_seconds)
     client = None
     remote_names = []
     failure = None
@@ -393,22 +451,30 @@ def generate_plan(
     try:
         client = _client()
         contents = []
-        for index, clip in enumerate(clips):
+        if source_seconds <= INLINE_SOURCE_SECONDS:
+            try:
+                contents = _inline_video_parts(clips, fps, progress, deadline)
+            except (media.MediaError, OSError, TimeoutError):
+                # Ingen analysekopi er send enno. File API kan framleis lese originalane.
+                pass
+        files_to_upload = [] if contents else clips
+        for index, clip in enumerate(files_to_upload):
             progress(3 + int(20 * index / len(clips)), f"Sender klipp {index + 1} av {len(clips)} til Google")
             path = Path(clip["path"])
             mime = MIME_TYPES.get(path.suffix.lower())
             if not mime:
                 raise GeminiError("Videoformatet kan ikkje sendast til Gemini. Bruk MP4, MOV, WebM eller MKV.", "file_type")
+            operation = "upload"
+            options = _http_options(_remaining_ms(deadline, 120_000))
             # Google støttar eit førehandsvalt filnamn. Journalfør FØR nettverkskallet:
             # då kan vi slette fila òg om upload-svaret aldri kjem fram.
             reserved_name = "files/" + uuid4().hex
             if on_uploaded:
                 on_uploaded(reserved_name)
             remote_names.append(reserved_name)
-            operation = "upload"
             uploaded = client.files.upload(
                 file=path,
-                config=types.UploadFileConfig(name=reserved_name, mime_type=mime, http_options=_http_options(120_000)),
+                config=types.UploadFileConfig(name=reserved_name, mime_type=mime, http_options=options),
             )
             if uploaded.name != reserved_name:
                 if isinstance(uploaded.name, str) and FILE_NAME.fullmatch(uploaded.name):
@@ -418,23 +484,26 @@ def generate_plan(
                 raise GeminiError("Google returnerte ein uventa filreferanse. Analysen er stoppa.", "file_reference")
             progress(4 + int(20 * index / len(clips)), f"Google klargjer klipp {index + 1} av {len(clips)}")
             operation = "file_processing"
-            ready = _wait_for_file(client, uploaded)
+            ready = _wait_for_file(client, uploaded, deadline)
             if not ready.uri or not ready.mime_type:
                 raise GeminiError("Google returnerte ufullstendige videometadata.", "file_reference")
             # ID og videoreferanse blir para tydeleg. Lokale stiar/filnamn blir ikkje sende.
             contents.extend([
-                types.Part.from_text(text=json.dumps({"clip_id": clip["id"], "duration_seconds": clip["duration"]})),
-                types.Part.from_uri(file_uri=ready.uri, mime_type=ready.mime_type),
+                _clip_metadata(clip),
+                types.Part(
+                    file_data=types.FileData(file_uri=ready.uri, mime_type=ready.mime_type),
+                    video_metadata=types.VideoMetadata(fps=fps),
+                ),
             ])
         instruction = edit_instruction(description, duration_seconds, style, len(clips))
         contents.append(types.Part.from_text(text=json.dumps(instruction, ensure_ascii=False)))
-        progress(28, f"Gemini analyserer videoklippa og lagar ein klippeplan. Dette forsøket har ei tidsgrense på {ANALYSIS_TIMEOUT_MS // 1000} sekund.")
+        progress(28, "Gemini analyserer klippa og lagar ein klippeplan")
         operation = "analysis"
         selected_model = model or model_name()
         response = _generate_content_with_backoff(
             client, progress=progress,
             model=selected_model, contents=contents,
-            config=_generation_config(selected_model),
+            config=_generation_config(selected_model), deadline=deadline,
         )
         progress(40, "Validerer klippeplanen frå Gemini")
         try:
@@ -447,13 +516,16 @@ def generate_plan(
         except media.MediaError as error:
             # parse_plan gir berre eigne, sanerte meldingar, aldri rå AI-svar.
             raise GeminiError(f"Gemini-planen kunne ikkje brukast: {error} Ingen video er eksportert.", "invalid_plan") from None
-        progress(42, "Ryddar mellombelse videofiler hos Google")
+        if remote_names:
+            progress(42, "Ryddar mellombelse videofiler hos Google")
     except GeminiError as error:
         failure = error
     except Exception as error:
         failure = _safe_error(error, operation=operation)
     finally:
-        remaining = _delete_files(client, remote_names, on_deleted) if client is not None else remote_names
+        cleanup_deadline = time.monotonic() + CLEANUP_WAIT_SECONDS if deadline is not None else None
+        remaining = (_delete_files(client, remote_names, on_deleted, deadline=cleanup_deadline)
+                     if client is not None else remote_names)
         if client is not None:
             try:
                 client.close()

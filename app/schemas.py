@@ -31,6 +31,7 @@ class EditInput(BaseModel):
     subtitles: bool = False
     mode: Literal["basic", "gemini"] = "basic"
     ai_consent: bool = Field(default=False, strict=True)
+    basic_fallback: bool = Field(default=False, strict=True)
 
 
 class ScheduleInput(BaseModel):

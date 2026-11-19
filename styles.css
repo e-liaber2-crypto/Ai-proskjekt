@@ -1332,6 +1332,12 @@ main {
   border-color: #645184;
 }
 
+.job-mode.fallback {
+  color: #ffe1a1;
+  background: #392e25;
+  border-color: #765c3b;
+}
+
 .result-mode {
   margin-bottom: 12px;
   color: #c5cde4;

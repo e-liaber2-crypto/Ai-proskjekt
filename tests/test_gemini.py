@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from google.genai import errors
+import httpx
 
 from app import gemini, media
 from app.main import create_app
@@ -137,6 +138,8 @@ class NoNetworkCase(unittest.TestCase):
         patch("httpx.HTTPTransport.handle_request", side_effect=AssertionError("Eksternt HTTP-nettverk er forbode i Gemini-testane.")).start()
         patch("httpx.AsyncHTTPTransport.handle_async_request", side_effect=AssertionError("Eksternt HTTP-nettverk er forbode i Gemini-testane.")).start()
         patch("app.gemini.POLL_INTERVAL_SECONDS", 0).start()
+        # Desse testane kontrollerer File API. Testar av direkte video slår det på per test.
+        patch("app.gemini.INLINE_SOURCE_SECONDS", 0).start()
         self.clips = []
         for identifier in ("clip-a", "clip-b"):
             path = self.directory / f"{identifier}.mp4"
@@ -382,6 +385,18 @@ class GeminiSdkTests(NoNetworkCase):
         self.assertEqual(wait.call_count, 1)
         self.assertEqual(len(self.fake.files.uploads), 1)
         self.assertEqual(len(self.fake.files.deletes), 1)
+
+    def test_overload_does_not_retry_when_reserve_budget_cannot_fit_the_wait(self):
+        self.fake.models.error = errors.ServerError(503, {"error": {"message": "Overloaded"}})
+        with patch("app.gemini.time.sleep") as wait, self.assertRaises(gemini.GeminiError) as raised:
+            gemini.generate_plan(
+                self.clips[:1], "Vel eit utdrag.", 2, "professional", lambda *_: None,
+                deadline=time.monotonic() + 1, on_uploaded=self.uploaded, on_deleted=self.deleted,
+            )
+        self.assertEqual(raised.exception.code, "timeout")
+        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertFalse(self.pending)
+        wait.assert_not_called()
 
     def test_overload_followed_by_quota_or_timeout_stops_immediately(self):
         overloaded = errors.ServerError(503, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
@@ -756,6 +771,30 @@ class GeminiApiTests(NoNetworkCase):
         self.assertEqual(restored["status"], "failed")
         self.assertEqual(restored["error"], job["error"])
         self.assertEqual(len(self.fake.models.calls), 1, "Omstart skal ikkje prøve ein betalt analyse på nytt")
+
+    def test_short_job_with_reserve_exports_mp4_after_google_times_out(self):
+        self.fake.models.error = httpx.ReadTimeout(PROVIDER_PRIVATE_TEXT)
+        with patch("app.gemini.INLINE_SOURCE_SECONDS", 60):
+            response = self.submit(basic_fallback=True)
+            self.assertEqual(response.status_code, 202, response.text)
+            job = self.await_job(response.json()["id"])
+
+        self.assertEqual(job["status"], "completed", job)
+        self.assertEqual(job["fallback_reason"], "timeout")
+        self.assertEqual(job["settings"]["mode"], "gemini")
+        self.assertTrue(job["settings"]["basic_fallback"])
+        self.assertEqual(len(self.fake.models.calls), 1)
+        self.assertLessEqual(self.fake.models.calls[0]["config"].http_options.timeout, gemini.RESERVE_WAIT_SECONDS * 1000)
+        self.assertFalse(self.fake.files.uploads)
+        self.assertFalse(self.fake.files.deletes)
+        clip_id = self.api.app.state.store.source_clips(self.project_id)[0]["id"]
+        self.assertEqual(job["plan"], [{"clip_id": clip_id, "start_seconds": 0, "end_seconds": 1, "order": 1}])
+        download = self.api.get(f"/api/jobs/{job['id']}/download")
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.headers["content-type"], "video/mp4")
+        self.assertEqual(download.content[4:8], b"ftyp")
+        project = self.api.get(f"/api/projects/{self.project_id}").json()
+        self.assertEqual(project["latest_job"]["fallback_reason"], "timeout")
 
     def test_failed_remote_cleanup_is_persisted_and_retried_on_restart_without_analysis(self):
         self.fake.models.error = errors.ClientError(429, {"error": {"message": PROVIDER_PRIVATE_TEXT}})
