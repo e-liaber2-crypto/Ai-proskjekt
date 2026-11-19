@@ -1024,10 +1024,6 @@ main {
   accent-color: #8b80fa;
 }
 
-.check-field.disabled {
-  color: #8692ad;
-}
-
 .check-field input:disabled {
   opacity: 0.5;
 }
