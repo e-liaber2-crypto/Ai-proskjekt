@@ -29,6 +29,7 @@ class EditInput(BaseModel):
     fit: Literal["pad", "crop"] = "pad"
     style: Literal["calm", "energetic", "professional"] = "professional"
     subtitles: bool = False
+    clip_labels: bool = Field(default=False, strict=True)
     mode: Literal["basic", "gemini"] = "basic"
     ai_consent: bool = Field(default=False, strict=True)
     basic_fallback: bool = Field(default=False, strict=True)

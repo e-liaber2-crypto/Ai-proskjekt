@@ -141,11 +141,13 @@ Stilen styrer enkle fade-inn- og fade-ut-effektar: roleg brukar inntil 0,6 sekun
 
 ### Korleis Gemini-redigeringa verkar
 
-På Render sender appen opptil tre tidsmerkte bilete frå kvart klipp i ei samla analyseførespurnad. Gemini brukar bileta og instruksjonen til å velje utdrag og rekkjefølgje. FFmpeg brukar tidspunkta til å hente dei valde utdraga frå originalklippa, med lyd.
+På Render sender appen tidsmerkte bilete frå kvart klipp i ei samla analyseførespurnad. Prosjekt med opptil fire klipp og 60 sekund kjeldemateriale får opptil fem bilete frå kvart klipp. Større prosjekt får opptil tre. Gemini brukar bileta og instruksjonen til å velje utdrag og rekkjefølgje. FFmpeg hentar dei valde utdraga frå originalklippa, med lyd.
 
 Ved lokal køyring brukar appen små MP4-kopiar med lyd for opptil 60 sekund samla kjeldemateriale. Lengre prosjekt og kopiar som ikkje kan lagast innan førebuingsgrensa, brukar Gemini File API.
 
 Serveren kontrollerer klipp-ID, klippepunkt og lengd før eksport. På Render har biletførebuinga eiga tidsgrense, og Gemini får om lag 75 sekund etter at bileta er klare. Lokale AI-jobbar har framleis om lag 45 sekund til AI-stega. Ved Gemini-feil går appen vidare med enkel klipping og merkar eksporten **Reserve · enkel redigering utan AI**.
+
+I redigeraren kan du starte med ein instruksjonsmal for sterk opning, roleg forteljing eller rangering. **Korte tekstar på klippa** lèt Gemini foreslå korte linjer om motiva som blir viste. Under den ferdige videoen viser **Sjå klippeplan** kjeldefilene, klippepunkta og dei valde tekstane. Små avrundingsavvik kan rettast ved å flytte eitt sluttpunkt innanfor kjeldeklippet og utan overlapp.
 
 Ved HTTP 503 under analyse ventar appen og prøver opptil to gonger til med same innhald, så lenge det er tid att. På Render går standardmodellen Gemini 3.8 Flash over til Gemini 3.5 Flash-Lite ved neste forsøk. Ei anna modellinnstilling blir brukt som vald. Ventestatus, modell og forsøksnummer blir viste på jobben.
 

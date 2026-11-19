@@ -1321,6 +1321,25 @@ main {
   color: #e5def8;
 }
 
+.creative-tools {
+  margin: 0 0 20px;
+  padding: 14px;
+  border: 1px solid #454365;
+  border-radius: 10px;
+  background: #1c2034;
+}
+
+.template-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.creative-tools .check-field {
+  margin: 0;
+}
+
 .job-mode {
   margin-bottom: 10px;
   white-space: normal;
@@ -2175,7 +2194,7 @@ main {
   border: 0;
 }
 
-.ranking-summary, .narration-script {
+.ranking-summary, .narration-script, .cut-summary {
   margin-top: 20px;
   padding: 18px;
   border: 1px solid #393654;
@@ -2188,7 +2207,12 @@ main {
 .ranking-list { list-style: none; padding: 0; margin: 16px 0 0; }
 .ranking-item { padding: 14px 0; border-top: 1px solid #393654; }
 .ranking-item strong { color: #d9d1ff; }
-.narration-script summary { cursor: pointer; color: #d9d1ff; }
+.narration-script summary, .cut-summary summary { cursor: pointer; color: #d9d1ff; }
+.cut-list { margin: 12px 0 0; padding-left: 24px; }
+.cut-item { padding: 10px 0; }
+.cut-item + .cut-item { border-top: 1px solid #393654; }
+.cut-item strong, .cut-item span { display: block; }
+.cut-item p { margin: 4px 0 0; }
 .result-status-notice {
   padding: 14px 16px;
   border: 1px solid #85672b;

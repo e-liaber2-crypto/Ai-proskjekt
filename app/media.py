@@ -18,6 +18,7 @@ from typing import Callable
 
 
 MAX_SEGMENTS = 12
+MAX_CLIP_LABEL_CHARS = 48
 MAX_EXPORT_SECONDS = 600
 ASPECTS = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
 FADES = {"calm": 0.6, "energetic": 0.0, "professional": 0.25}

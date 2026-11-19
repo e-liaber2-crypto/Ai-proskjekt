@@ -268,7 +268,7 @@ class VideoWorker:
                         clips, settings["description"], settings["duration_seconds"], settings["style"], progress,
                         on_uploaded=remember_file, on_deleted=forget_file, model=settings.get("gemini_model"),
                         deadline=started + gemini.RESERVE_WAIT_SECONDS if reserve and not self.use_frames else None,
-                        use_frames=self.use_frames,
+                        use_frames=self.use_frames, clip_labels=settings.get("clip_labels", False),
                     )
                 except gemini.GeminiError as error:
                     if not reserve:
@@ -285,6 +285,7 @@ class VideoWorker:
             public_plan = [{"clip_id": part["clip_id"], "start_seconds": part["start"],
                             "end_seconds": part["start"] + part["duration"], "order": index + 1,
                             **({"ranking": part["ranking"]} if part.get("ranking") else {}),
+                            **({"caption": part["caption"]} if part.get("caption") else {}),
                             **({"presentation": part["presentation"]} if part.get("presentation") else {}),
                             **({"voiceover": part["voiceover"]} if part.get("voiceover") else {})}
                            for index, part in enumerate(plan)]
@@ -502,6 +503,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             settings = body.model_dump(exclude={"description", "basic_fallback"})
             # Nye Gemini-jobbar brukar reserve, også frå ein eldre nettlesarfane.
             settings["basic_fallback"] = body.mode == "gemini"
+            settings["clip_labels"] = body.mode == "gemini" and body.clip_labels
             job_settings = {**settings, "description": body.description}
             if body.mode == "gemini":
                 job_settings["gemini_model"] = gemini.model_name()

@@ -18,6 +18,7 @@ from . import media
 
 MAX_RESPONSE_CHARACTERS = 64 * 1024
 MIN_SEGMENT_SECONDS = 1 / 24
+MAX_DURATION_CORRECTION_SECONDS = 0.25
 
 
 def _readable_text(value: str) -> str:
@@ -66,11 +67,22 @@ class Segment(BaseModel):
     order: int = Field(strict=True, ge=1, le=media.MAX_SEGMENTS)
     ranking: RankingLabel | None = None
     voiceover: str | None = Field(default=None, min_length=1, max_length=220)
+    caption: str | None = Field(default=None, min_length=1, max_length=media.MAX_CLIP_LABEL_CHARS)
 
     @field_validator("voiceover")
     @classmethod
     def readable_voiceover(cls, value):
         return _readable_text(value) if value is not None else None
+
+    @field_validator("caption", mode="before")
+    @classmethod
+    def optional_caption(cls, value):
+        if isinstance(value, str):
+            text = value.strip()
+            if 0 < len(text) <= media.MAX_CLIP_LABEL_CHARS and text.isprintable():
+                return text
+        # Eit uleseleg tekstforslag skal ikkje stoppe ein gyldig klippeplan.
+        return None
 
 
 class CutPlan(BaseModel):
@@ -108,9 +120,30 @@ def _source_number(value: object) -> float:
     return number
 
 
+def _fit_duration(plan: list[dict], sources: dict, target: float) -> None:
+    """Flytt eitt sluttpunkt litt når Gemini har avrunda totallengda."""
+    adjustment = target - math.fsum(part["duration"] for part in plan)
+    if abs(adjustment) <= 0.002:
+        return
+    limit = min(MAX_DURATION_CORRECTION_SECONDS, max(0.05, target * 0.03))
+    if abs(adjustment) <= limit:
+        for part in reversed(plan):
+            duration = part["duration"] + adjustment
+            end = part["start"] + duration
+            if duration + 1e-9 < MIN_SEGMENT_SECONDS or end > sources[part["clip_id"]]["duration"]:
+                continue
+            if any(other is not part and other["clip_id"] == part["clip_id"]
+                   and part["start"] < other["start"] < end for other in plan):
+                continue
+            part["duration"] = duration
+            return
+    raise media.MediaError("Lengda til AI-klippeplanen stemmer ikkje med ønskt eksportlengd.")
+
+
 def parse_plan(text: str, clips: list[dict], target_duration: float, *, require_ranking: bool = False,
                ranking_direction: Literal["best_first", "worst_first"] | None = None,
-               narration_requested: bool = False, expected_title: str | None = None) -> list[dict]:
+               narration_requested: bool = False, expected_title: str | None = None,
+               clip_labels: bool = False) -> list[dict]:
     """Avvis ugyldige svar, og returner ein plan som FFmpeg-motoren kan bruke.
 
     Feiltekstane inneheld aldri modellsvaret eller Pydantic sine rå feil, som
@@ -214,11 +247,13 @@ def parse_plan(text: str, clips: list[dict], target_duration: float, *, require_
         if source is None:
             raise media.MediaError("AI-klippeplanen viser til eit klipp som ikkje høyrer til prosjektet.")
         start, end = segment.start_seconds, segment.end_seconds
-        duration = end - start
         if end <= start:
             raise media.MediaError("Sluttpunktet til kvart utdrag må vere etter startpunktet.")
-        if start >= source["duration"] or end > source["duration"]:
+        if start >= source["duration"] or end > source["duration"] + MIN_SEGMENT_SECONDS:
             raise media.MediaError("Eit AI-utdrag går utanfor lengda til kjeldeklippet.")
+        # Videoar blir ofte skildra med avrunda sekund. Hald klippet innanfor fila.
+        end = min(end, source["duration"])
+        duration = end - start
         if duration + 1e-9 < MIN_SEGMENT_SECONDS:
             raise media.MediaError("Kvart AI-utdrag må vare minst éi videoramme (1/24 sekund).")
         source_intervals.setdefault(segment.clip_id, []).append((start, end))
@@ -235,6 +270,8 @@ def parse_plan(text: str, clips: list[dict], target_duration: float, *, require_
             plan[-1]["ranking"] = segment.ranking.model_dump()
         if segment.voiceover is not None:
             plan[-1]["voiceover"] = segment.voiceover
+        if clip_labels and segment.caption is not None:
+            plan[-1]["caption"] = segment.caption
 
     if ranked or cut_plan.presentation is not None or requested.narration or requested.title:
         plan[0]["presentation"] = presentation.model_dump()
@@ -244,8 +281,7 @@ def parse_plan(text: str, clips: list[dict], target_duration: float, *, require_
         if any(current[0] < previous[1] for previous, current in zip(chronological, chronological[1:])):
             raise media.MediaError("AI-klippeplanen brukar overlappande utdrag frå det same kjeldeklippet.")
 
-    if abs(math.fsum(segment["duration"] for segment in plan) - target) > 0.002:
-        raise media.MediaError("Lengda til AI-klippeplanen stemmer ikkje med ønskt eksportlengd.")
+    _fit_duration(plan, sources, target)
     # Motoren gjer ein siste, uavhengig kontroll av kjelde-ID, filsti, lyd og tid.
     media.validate_plan(plan, clips, target)
     return plan
