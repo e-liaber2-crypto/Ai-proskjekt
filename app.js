@@ -320,6 +320,20 @@ async function editor(id, token) {
         <div class="field"><label id="duration-label">Ønskt lengd</label><div class="duration-presets" role="group" aria-label="Vel kort eller lang video"><button class="button secondary small" type="button" data-duration="30" data-lock aria-pressed="false">Kort · 30 sekund</button><button class="button secondary small" type="button" data-duration="180" data-lock aria-pressed="false">Lang · 3 minutt</button></div><div class="duration-fields" role="group" aria-labelledby="duration-label"><label for="duration-minutes">Minutt<input id="duration-minutes" type="number" min="0" max="10" step="1" value="0" required data-lock></label><label for="duration-seconds">Sekund<input id="duration-seconds" type="number" min="0" max="59" step="1" value="30" required data-lock></label></div><span class="field-hint">Frå 1 sekund til 10 minutt. Videoen kan ikkje bli lengre enn kjeldematerialet.</span></div>
         <div id="duration-warning" class="info-box warning duration-warning" role="status" hidden></div>
         <div class="form-grid"><div class="field"><label for="aspect">Biletformat</label><select id="aspect" data-lock><option value="16:9">Liggjande · 16:9</option><option value="9:16">Ståande · 9:16</option><option value="1:1">Kvadratisk · 1:1</option></select></div><div class="field"><label for="fit">Tilpassing av biletet</label><select id="fit" data-lock><option value="pad">Bevar heile biletet med kantar</option><option value="crop">Beskjer for å fylle formatet</option></select></div><div class="field full"><label for="style">Redigeringsstil</label><select id="style" data-lock><option value="calm">Roleg · mjuke toningar</option><option value="energetic">Energisk · direkte klipp</option><option value="professional">Profesjonell · korte toningar</option></select></div></div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="video-text">Tekst i videoen (valfritt)</label>
+            <input id="video-text" type="text" maxlength="60" placeholder="Sommar på Stord" data-lock>
+          </div>
+          <div class="field">
+            <label for="video-text-timing">Vis teksten</label>
+            <select id="video-text-timing" data-lock>
+              <option value="opening">Første 3 sekund</option>
+              <option value="ending">Siste 3 sekund</option>
+              <option value="all">Heile videoen</option>
+            </select>
+          </div>
+        </div>
         <button class="button wide" type="submit" id="render-button">${icons("play")} Lag video</button><p id="render-help" class="render-help" role="status"></p><p class="render-note">MP4 · H.264 · opptil 720p · 24 bilete/s. Éin videojobb blir behandla om gongen. Innstillingane blir lagra når du startar eksporten.</p><p id="render-error" class="error-inline" role="alert"></p></form>
       </div></section>
     </div><div class="stack"><section class="panel" aria-labelledby="preview-heading"><div class="panel-header"><div class="panel-heading"><span class="section-number">03</span><h2 id="preview-heading">Resultatet ditt</h2></div><span class="muted small">FØREHANDSVISING</span></div><div class="panel-body"><div id="result"></div><div id="job-status" aria-live="polite"></div><div id="history"></div></div></section>
@@ -336,6 +350,8 @@ async function editor(id, token) {
   byId("style").value = settings.style || "professional";
   byId("edit-mode").value = settings.mode === "gemini" ? "gemini" : "basic";
   byId("clip-labels").checked = settings.clip_labels === true;
+  byId("video-text").value = settings.video_text?.text || "";
+  byId("video-text-timing").value = settings.video_text?.timing || "opening";
   // Gamalt samtykke frå ei lagra jobb er aldri samtykke til ein ny eksport.
   byId("ai-consent").checked = false;
   byId("edit-mode").addEventListener("change", () => {
@@ -389,6 +405,7 @@ async function editor(id, token) {
   byId("settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     inlineError("render-error", "");
+    const videoText = byId("video-text").value.trim();
     const settings = {
       description: byId("description").value,
       duration_seconds: requestedDuration(),
@@ -397,6 +414,7 @@ async function editor(id, token) {
       style: byId("style").value,
       subtitles: false,
       clip_labels: byId("edit-mode").value === "gemini" && byId("clip-labels").checked,
+      video_text: videoText ? { text: videoText, timing: byId("video-text-timing").value } : null,
       mode: byId("edit-mode").value,
       ai_consent:
         byId("edit-mode").value === "gemini" && byId("ai-consent").checked,

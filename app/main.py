@@ -294,7 +294,10 @@ class VideoWorker:
             def render_progress(percent, stage):
                 progress(45 + int(percent * 0.54) if ai_mode else percent, stage)
 
-            result = media.render(plan, output, settings["aspect"], settings["fit"], settings["style"], render_progress)
+            result = media.render(
+                plan, output, settings["aspect"], settings["fit"], settings["style"], render_progress,
+                video_text=settings.get("video_text"),
+            )
             size = output.stat().st_size
             if self.store.usage()["storage_bytes"] + size > MAX_STORAGE:
                 raise media.MediaError("Lagringsgrensa på 2 GiB er nådd. Slett eit prosjekt og prøv igjen.")

@@ -149,6 +149,8 @@ Serveren kontrollerer klipp-ID, klippepunkt og lengd før eksport. På Render ha
 
 I redigeraren kan du starte med ein instruksjonsmal for sterk opning, roleg forteljing eller rangering. **Korte tekstar på klippa** lèt Gemini foreslå korte linjer om motiva som blir viste. Under den ferdige videoen viser **Sjå klippeplan** kjeldefilene, klippepunkta og dei valde tekstane. Små avrundingsavvik kan rettast ved å flytte eitt sluttpunkt innanfor kjeldeklippet og utan overlapp.
 
+Med **Tekst i videoen** kan du skrive opptil 60 teikn sjølv og vise teksten dei første tre sekunda, dei siste tre sekunda eller gjennom heile videoen. Det fungerer med Gemini og enkel redigering. Appen legg teksten på lokalt under MP4-eksporten.
+
 Ved HTTP 503 under analyse ventar appen og prøver opptil to gonger til med same innhald, så lenge det er tid att. På Render går standardmodellen Gemini 3.8 Flash over til Gemini 3.5 Flash-Lite ved neste forsøk. Ei anna modellinnstilling blir brukt som vald. Ventestatus, modell og forsøksnummer blir viste på jobben.
 
 Når planen er godkjend, lagar FFmpeg den faktiske videofila lokalt. Gemini lagar altså klippeplanen; FFmpeg produserer MP4-fila. Resultatet bør alltid sjåast gjennom før du brukar det vidare, fordi AI kan misforstå innhaldet eller velje dårlege klippepunkt.

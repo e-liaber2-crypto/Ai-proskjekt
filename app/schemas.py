@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .media import MAX_EXPORT_SECONDS
+from .media import MAX_EXPORT_SECONDS, MAX_VIDEO_TEXT_CHARS
 
 
 class ProjectInput(BaseModel):
@@ -21,6 +21,19 @@ class ProjectInput(BaseModel):
         return value
 
 
+class VideoTextInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    text: str = Field(min_length=1, max_length=MAX_VIDEO_TEXT_CHARS)
+    timing: Literal["opening", "ending", "all"] = "opening"
+
+    @field_validator("text")
+    @classmethod
+    def readable_text(cls, value: str) -> str:
+        if not value.isprintable():
+            raise ValueError("Teksten i videoen må vere éi lesbar linje.")
+        return value
+
+
 class EditInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     description: str = Field(default="", max_length=4000)
@@ -30,6 +43,7 @@ class EditInput(BaseModel):
     style: Literal["calm", "energetic", "professional"] = "professional"
     subtitles: bool = False
     clip_labels: bool = Field(default=False, strict=True)
+    video_text: VideoTextInput | None = None
     mode: Literal["basic", "gemini"] = "basic"
     ai_consent: bool = Field(default=False, strict=True)
     basic_fallback: bool = Field(default=False, strict=True)

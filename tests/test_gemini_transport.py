@@ -77,6 +77,7 @@ class GeminiTransportTests(unittest.TestCase):
                     "description": "Bruk klippet med raud farge først, og det blå etterpå.",
                     "duration_seconds": 2, "style": "energetic", "mode": "gemini", "ai_consent": True,
                     "clip_labels": True,
+                    "video_text": {"text": "Sommar på Stord", "timing": "all"},
                 })
                 self.assertEqual(accepted.status_code, 202, accepted.text)
                 job_path = f"/api/jobs/{accepted.json()['id']}"
@@ -103,12 +104,13 @@ class GeminiTransportTests(unittest.TestCase):
                     ], check=True, capture_output=True, timeout=15).stdout
                     self.assertEqual(len(sample), 3)
                     self.assertGreater(sample[channel], 180)
-                caption_pixels = subprocess.run([
-                    "ffmpeg", "-v", "error", "-nostdin", "-ss", "0.5", "-i", str(output),
-                    "-frames:v", "1", "-vf", "crop=760:100:260:552", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
-                ], check=True, capture_output=True, timeout=15).stdout
-                lit = sum(min(rgb) > 190 for rgb in zip(caption_pixels[0::3], caption_pixels[1::3], caption_pixels[2::3]))
-                self.assertGreater(lit, 100, "Tekst skal vere synleg i den elles raude ramma.")
+                for region in ("760:60:260:526", "760:70:260:586"):
+                    text_pixels = subprocess.run([
+                        "ffmpeg", "-v", "error", "-nostdin", "-ss", "0.5", "-i", str(output),
+                        "-frames:v", "1", "-vf", f"crop={region}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+                    ], check=True, capture_output=True, timeout=15).stdout
+                    lit = sum(min(rgb) > 190 for rgb in zip(text_pixels[0::3], text_pixels[1::3], text_pixels[2::3]))
+                    self.assertGreater(lit, 100, f"Tekst manglar i området {region}.")
 
         self.assertEqual([r.url.path for r in requests], [
             f"/v1beta/models/{gemini.DEFAULT_MODEL}:generateContent",
@@ -116,6 +118,7 @@ class GeminiTransportTests(unittest.TestCase):
         ])
         payloads = [json.loads(r.content)["contents"][0]["parts"] for r in requests]
         self.assertEqual(payloads[0], payloads[1])
+        self.assertNotIn("Sommar på Stord", json.dumps(payloads[0], ensure_ascii=False))
         self.assertGreater(requests[0].extensions["timeout"]["read"], 60)
         parts = payloads[0]
         self.assertEqual([json.loads(part["text"])["clip_id"] for part in parts[:-1]
