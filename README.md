@@ -126,7 +126,7 @@ Gemini-analyse kan koste pengar og lastar videoklippa opp til Google. Bruk berre
 1. Opprett eit prosjekt med eit namn.
 2. Last opp eitt eller fleire små videoklipp.
 3. Vel enkel redigering utan AI, eller Gemini-analyse dersom ho er konfigurert. Skriv kva du ønskjer å lage; teksten blir berre tolka i Gemini-modus.
-4. Vel lengd, format, kantar eller beskjering og redigeringsstil. I Gemini-modus må du òg godkjenne sendinga til Google. Kryss av for **Fullfør med enkel redigering om Gemini feilar** dersom du ønskjer ein reserveeksport.
+4. Vel lengd, format, kantar eller beskjering og redigeringsstil. Kortvalet tilpassar seg korte klipp. I Gemini-modus må du òg godkjenne sendinga til Google. Appen går vidare med enkel redigering dersom Gemini feilar.
 5. Start behandling. Statusen kjem frå den faktiske bakgrunnsjobben.
 6. Spel av resultatet og last ned MP4-fila.
 7. Du kan lagre ein lokal publiseringsplan etter at du har godkjent videoen, kanalen og tidspunktet.
@@ -143,9 +143,9 @@ Stilen styrer enkle fade-inn- og fade-ut-effektar: roleg brukar inntil 0,6 sekun
 
 Ved opptil 60 sekund samla kjeldemateriale lagar bakgrunnsarbeidaren små MP4-kopiar med lyd, og sender dei direkte i analyseførespurnaden. Då treng ikkje appen vente på at Google klargjer kvar fil. Lengre prosjekt og kopiar som ikkje kan lagast innan førebuingsgrensa, brukar Gemini File API. På lengre klipp ber appen om færre bilete per sekund for å avgrense analysearbeidet. Gemini returnerer ein plan med klipp-ID, starttid, sluttid og rekkjefølgje. FFmpeg brukar originalklippa til den ferdige videoen.
 
-Serveren kontrollerer planen før eksport: klipp-ID-ane må finnast i prosjektet, tider må vere endelege og innanfor kjeldeklippa, og planen må halde seg innanfor ønskte lengde- og ressursgrenser. Modellen kan ikkje sende filstiar eller shell-kommandoar til FFmpeg. Dersom du har valt reserve, får AI-stega om lag 90 sekund før appen går vidare med enkel klipping ved tidsavbrot. Reserve gjeld òg andre Gemini-feil. Appen merkar reserveeksporten med **Reserve · enkel redigering utan AI**. Han brukar den valde lengda, formatet og stilen. Berre Gemini kan tolke tekstinstruksjonen.
+Serveren kontrollerer planen før eksport: klipp-ID-ane må finnast i prosjektet, tider må vere endelege og innanfor kjeldeklippa, og planen må halde seg innanfor ønskte lengde- og ressursgrenser. Modellen kan ikkje sende filstiar eller shell-kommandoar til FFmpeg. Nye jobbar gir AI-stega om lag 45 sekund og går automatisk vidare med enkel klipping ved tidsavbrot eller andre Gemini-feil. Appen merkar reserveeksporten med **Reserve · enkel redigering utan AI**. Han brukar den valde lengda, formatet og stilen. Berre Gemini kan tolke tekstinstruksjonen.
 
-Ved Google-serverfeil blir steget og HTTP-statusen logga med ei fast feilkategori. Ved HTTP 503 under analyse ventar appen og prøver opptil to gonger til med same innhald og modell, så lenge det er tid att. Ventestatus og forsøksnummer blir viste på jobben. Utan reserve blir ein mislukka jobb vist med ei feilmelding og eit val om enkel redigering.
+Ved Google-serverfeil blir steget og HTTP-statusen logga med ei fast feilkategori. Ved HTTP 503 under analyse ventar appen og prøver opptil to gonger til med same innhald og modell, så lenge det er tid att. Ventestatus og forsøksnummer blir viste på jobben.
 
 Når planen er godkjend, lagar FFmpeg den faktiske videofila lokalt. Gemini lagar altså klippeplanen; FFmpeg produserer MP4-fila. Resultatet bør alltid sjåast gjennom før du brukar det vidare, fordi AI kan misforstå innhaldet eller velje dårlege klippepunkt.
 
@@ -159,7 +159,7 @@ Appen kallar SDK-et si filopplasting éin gong per kjeldeklipp. Modellen blir ka
 
 Ventinga på kvar Google-fil er avgrensa til maksimalt 30 statusoppslag med to sekund mellom oppslaga. Kvar fil har ei klargjeringsgrense på 120 sekund, og kvart oppslag ventar i høgst ti sekund på svar. Førespurnader under opplasting har ei standardgrense på 120 sekund. Med reserve blir desse grensene korta ned til tida som står att.
 
-Kvart analyseforsøk ventar normalt opptil **180 sekund** på svar. Med reserve gjeld tida som står att av budsjettet på 90 sekund. Gemini 3.8 Flash brukar tenkjenivå `low` for lågare ventetid og tokenbruk. Eit tidsavbrot blir ikkje automatisk analysert på nytt. Eventuell filopprydding og sjølve eksporten kjem i tillegg til ventetida for analysen.
+Kvart analyseforsøk får tida som står att av budsjettet på 45 sekund. Gemini 3.8 Flash brukar tenkjenivå `low` for lågare ventetid og tokenbruk. Eit tidsavbrot blir ikkje automatisk analysert på nytt. Eventuell filopprydding og sjølve eksporten kjem i tillegg til ventetida for analysen.
 
 Filreferansane blir lagra før opplasting, slik at appen kan prøve å rydde opp òg om ei opplasting blir avbroten før Google har svart.
 
