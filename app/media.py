@@ -153,6 +153,27 @@ def probe(path: Path) -> dict:
         raise MediaError("Kunne ikkje lese gyldige videometadata frå fila.") from exc
 
 
+def make_analysis_copy(clip: dict, destination: Path, timeout: float) -> None:
+    """Lag ei lita MP4-fil som bevarer tidslinja og lyden for videoanalysen."""
+    _run(
+        [
+            _binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-threads", "1", "-filter_threads", "1",
+            "-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm",
+            "-i", str(_local_file(clip["path"])),
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1",
+            "-t", f"{clip['duration']:.6f}",
+            "-vf", "fps=6:round=up,scale=320:320:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+            "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-crf", "27", "-maxrate", "240k", "-bufsize", "240k",
+            "-c:a", "aac", "-b:a", "32k", "-ac", "1", "-ar", "16000",
+            str(destination),
+        ],
+        timeout=timeout,
+        failure="Kunne ikkje lage ei lita analysekopi av videoen.",
+    )
+
+
 def build_plan(clips: list[dict], duration_seconds: float, style: str) -> list[dict]:
     """Vel proporsjonale utdrag, utan tilfeldige kutt eller påstått AI-analyse."""
     target = _number(duration_seconds, "Ønskt lengd")

@@ -16,6 +16,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
+import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -88,6 +89,8 @@ class Store:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
             if "plan" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN plan TEXT")
+            if "fallback_reason" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN fallback_reason TEXT")
 
     @contextmanager
     def connect(self):
@@ -192,7 +195,7 @@ class VideoWorker:
 
     def run(self):
         # Køyr nettverksopprydding i arbeidstråden, aldri i HTTP-oppstarten.
-        self.cleanup_pending()
+        self.cleanup_pending(deadline=time.monotonic() + gemini.CLEANUP_WAIT_SECONDS)
         while not self.stopping.is_set():
             with self.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -205,20 +208,26 @@ class VideoWorker:
                 self.wakeup.wait(1)
                 self.wakeup.clear()
 
-    def cleanup_pending(self):
+    def cleanup_pending(self, *, deadline=None):
         names = [row["file_name"] for row in self.store.all("SELECT file_name FROM gemini_files")]
         if not names:
             return True
         inaccessible = set()
         remaining = gemini.cleanup_files(
             names, lambda name: self.store.execute("DELETE FROM gemini_files WHERE file_name=?", (name,)),
-            on_inaccessible=inaccessible.add,
+            on_inaccessible=inaccessible.add, deadline=deadline,
         )
         if remaining:
             LOGGER.warning("Opprydding av %s mellombelse Google-filer står att. Ingen analyse vart starta av oppryddinga.", len(remaining))
         # Historiske 403-referansar som manglar i ei fullført filliste blir
         # bevarte for seinare opprydding, men låser ikkje nye prosjekt.
         return not (set(remaining) - inaccessible)
+
+    @staticmethod
+    def log_gemini_failure(job_id, error):
+        # Ikkje logg SDK-unntak, HTTP-svar, instruksjonar eller nøkkelverdiar.
+        LOGGER.warning("Gemini-jobb %s feila (%s, steg=%s, HTTP=%s)",
+                       job_id, error.code, error.operation or "ukjent", error.http_status or "ukjent")
 
     def process(self, job):
         output_dir = self.store.directory / "outputs" / job["id"]
@@ -240,20 +249,33 @@ class VideoWorker:
                 requirements = gemini.editorial_requirements(settings["description"])
                 if requirements["narration_requested"] and not narration.availability()["available"]:
                     raise media.MediaError("Norsk forteljarstemme er ikkje tilgjengeleg på denne maskina. Installer ei norsk Windows-stemme eller fjern ønsket om tale.")
-                progress(2, "Ryddar eventuelle tidlegare Google-filer")
-                if not self.cleanup_pending():
-                    raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast eller kontrollerast. Kontroller API-tilgang og nettverk før du prøver igjen.", "cleanup")
-
                 def remember_file(name):
                     self.store.execute("INSERT OR IGNORE INTO gemini_files(file_name,job_id,created_at) VALUES(?,?,?)", (name, job["id"], now()))
 
                 def forget_file(name):
                     self.store.execute("DELETE FROM gemini_files WHERE file_name=?", (name,))
 
-                plan = gemini.generate_plan(
-                    clips, settings["description"], settings["duration_seconds"], settings["style"], progress,
-                    on_uploaded=remember_file, on_deleted=forget_file, model=settings.get("gemini_model"),
-                )
+                reserve = settings.get("basic_fallback") is True
+                started = time.monotonic()
+                try:
+                    progress(2, "Ryddar eventuelle tidlegare Google-filer")
+                    cleanup_deadline = started + gemini.CLEANUP_WAIT_SECONDS if reserve else None
+                    if not self.cleanup_pending(deadline=cleanup_deadline):
+                        raise gemini.GeminiError("Tidlegare Google-filer kunne ikkje ryddast eller kontrollerast. Kontroller API-tilgang og nettverk før du prøver igjen.", "cleanup")
+                    plan = gemini.generate_plan(
+                        clips, settings["description"], settings["duration_seconds"], settings["style"], progress,
+                        on_uploaded=remember_file, on_deleted=forget_file, model=settings.get("gemini_model"),
+                        deadline=started + gemini.RESERVE_WAIT_SECONDS if reserve else None,
+                    )
+                except gemini.GeminiError as error:
+                    if not reserve:
+                        raise
+                    self.log_gemini_failure(job["id"], error)
+                    self.store.execute(
+                        "UPDATE jobs SET fallback_reason=?, stage=?, progress=43 WHERE id=?",
+                        (error.code, "Fullfører med enkel redigering utan AI", job["id"]),
+                    )
+                    plan = media.build_plan(clips, settings["duration_seconds"], settings["style"])
             else:
                 plan = media.build_plan(clips, settings["duration_seconds"], settings["style"])
             media.validate_plan(plan, clips, settings["duration_seconds"])
@@ -279,9 +301,7 @@ class VideoWorker:
             shutil.rmtree(output_dir, ignore_errors=True)
             message = str(error) if isinstance(error, media.MediaError) else "Videobehandlinga feila. Kontroller serverloggen og prøv igjen."
             if isinstance(error, gemini.GeminiError):
-                # Ikkje logg SDK-unntak, HTTP-svar, instruksjonar eller nøkkelverdiar.
-                LOGGER.warning("Gemini-jobb %s feila (%s, steg=%s, HTTP=%s)",
-                               job["id"], error.code, error.operation or "ukjent", error.http_status or "ukjent")
+                self.log_gemini_failure(job["id"], error)
             else:
                 LOGGER.exception("Videobehandling feila for jobb %s", job["id"])
             self.store.execute("UPDATE jobs SET status='failed',stage='Behandlinga feila',error=?,finished_at=? WHERE id=?",
@@ -317,7 +337,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             LOGGER.exception("Helsesjekken fekk ikkje kontakt med databasen")
             database_ready = False
         ready = database_ready and worker.thread.is_alive() and media.tools_available()
-        return JSONResponse({"status": "ok" if ready else "unavailable"}, status_code=200 if ready else 503)
+        revision = os.getenv("RENDER_GIT_COMMIT", "") if hosting.on_render else ""
+        headers = {"X-Klipp-Revision": revision} if len(revision) == 40 and all(
+            char in "0123456789abcdef" for char in revision
+        ) else {}
+        return JSONResponse({"status": "ok" if ready else "unavailable"},
+                            status_code=200 if ready else 503, headers=headers)
 
     @application.get("/api/config")
     def config():
@@ -333,6 +358,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "Gamle referansar utan tilgang som manglar i Google-prosjektet si filliste, blokkerer ikkje nye jobbar."
                     if pending_cleanup else None),
                 "gemini_model": gemini.model_name(), "analysis_timeout_seconds": gemini.ANALYSIS_TIMEOUT_MS // 1000,
+                "gemini_reserve_wait_seconds": gemini.RESERVE_WAIT_SECONDS,
                 "transcription_available": False,
                 "ffmpeg_available": media.tools_available(), "timezone": "Europe/Oslo",
                 "limits": {"max_upload_mb": 200, "max_files": MAX_FILES, "max_clip_seconds": MAX_CLIP_SECONDS,

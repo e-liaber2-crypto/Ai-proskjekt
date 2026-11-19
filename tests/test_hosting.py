@@ -42,10 +42,13 @@ class HostingTests(unittest.TestCase):
         with patch.dict("os.environ", {
             "PUBLIC_HOST": "", "RENDER": "true", "RENDER_EXTERNAL_HOSTNAME": "demo.onrender.com",
             "DEMO_PASSWORD": "test-password-for-demo", "PERSISTENT_STORAGE": "false",
+            "RENDER_GIT_COMMIT": "a" * 40,
         }), tempfile.TemporaryDirectory() as directory, TestClient(
             create_app(Path(directory)), base_url="https://demo.onrender.com"
         ) as client:
-            self.assertEqual(client.get("/healthz").json(), {"status": "ok"})
+            response = client.get("/healthz")
+            self.assertEqual(response.json(), {"status": "ok"})
+            self.assertEqual(response.headers["X-Klipp-Revision"], "a" * 40)
             self.assertEqual(client.get("/api/config").status_code, 401)
             config = client.get("/api/config", auth=("laerar", "test-password-for-demo")).json()
             self.assertFalse(config["local_demo"])
