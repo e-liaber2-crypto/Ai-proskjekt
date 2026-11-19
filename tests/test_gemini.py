@@ -250,6 +250,16 @@ class GeminiPlanTests(NoNetworkCase):
                     gemini.parse_plan(text, self.clips, 2)
         self.client_constructor.assert_not_called()
 
+    def test_rounding_fix_preserves_starts_and_does_not_cross_the_next_cut(self):
+        text = json.dumps({"segments": [
+            {"clip_id": "clip-a", "start_seconds": 2, "end_seconds": 2.98, "order": 1},
+            {"clip_id": "clip-a", "start_seconds": 1, "end_seconds": 2, "order": 2},
+        ]})
+        plan = gemini.parse_plan(text, self.clips, 2)
+        self.assertEqual([part["start"] for part in plan], [2, 1])
+        self.assertAlmostEqual(plan[0]["duration"], 1)
+        self.assertEqual(plan[1]["duration"], 1)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg må vere installert")
     def test_validated_ai_plan_produces_playable_video_without_an_sdk_call(self):
         for clip, colour in zip(self.clips, ("red", "blue")):

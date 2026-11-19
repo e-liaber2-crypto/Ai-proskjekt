@@ -189,6 +189,40 @@ class VideoWorkflowTests(unittest.TestCase):
         self.assertGreater(usage["output_bytes"], 0)
         self.assertGreaterEqual(usage["rendered_seconds"], 5.5)
 
+    def test_video_text_is_burned_into_download_at_selected_time(self):
+        project_id = self.project()
+        self.upload(project_id, self.long_clip)
+        self.upload(project_id, self.long_clip)
+        text = "Sommar på Stord – 100 %"
+        for timing, expected in [
+            ("opening", [True, True, True, False]),
+            ("ending", [False, True, True, True]),
+            ("all", [True, True, True, True]),
+        ]:
+            with self.subTest(timing=timing):
+                job = self.completed_job(
+                    project_id, duration_seconds=4, style="energetic",
+                    video_text={"text": f"  {text} ", "timing": timing},
+                )
+                saved = {"text": text, "timing": timing}
+                self.assertEqual(len(job["plan"]), 2)
+                self.assertEqual(job["settings"]["video_text"], saved)
+                project = self.client.get(f"/api/projects/{project_id}").json()
+                self.assertEqual(project["settings"]["video_text"], saved)
+                response = self.client.get(f"/api/jobs/{job['id']}/download")
+                self.assertEqual(response.status_code, 200)
+                output = Path(self.data_dir.name) / f"text-{timing}.mp4"
+                output.write_bytes(response.content)
+                visible = []
+                for timestamp in (0.5, 1.5, 2.5, 3.5):
+                    pixels = self.ffmpeg(
+                        "-ss", str(timestamp), "-i", str(output), "-frames:v", "1",
+                        "-vf", "crop=760:100:260:552", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+                    ).stdout
+                    self.assertEqual(len(pixels), 760 * 100 * 3)
+                    visible.append(sum(red > 190 for red in pixels[0::3]) > 100)
+                self.assertEqual(visible, expected)
+
     def test_long_video_can_export_more_than_one_minute(self):
         project_id = self.project("Ein heil video på 61 sekund")
         clip = self.upload(project_id, self.long_clip)
@@ -243,9 +277,14 @@ class VideoWorkflowTests(unittest.TestCase):
             {"duration_seconds": 0}, {"duration_seconds": 601},
             {"duration_seconds": 1.5}, {"aspect": "3:2"}, {"fit": "stretch"},
             {"style": "unknown"}, {"subtitles": True},
+            {"video_text": {"text": " "}}, {"video_text": {"text": "a" * 61}},
+            {"video_text": {"text": "Linje 1\nLinje 2"}},
+            {"video_text": {"text": "Hei", "timing": "midten"}},
         ]:
             with self.subTest(settings=invalid):
-                self.assert_rejected(self.client.post(endpoint, json=self.settings(**invalid)))
+                settings = self.settings(duration_seconds=1)
+                settings.update(invalid)
+                self.assert_rejected(self.client.post(endpoint, json=settings))
         self.assertEqual(self.client.get(f"/api/projects/{project_id}").json()["jobs"], [])
 
     def test_background_failure_is_reported(self):

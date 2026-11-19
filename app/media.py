@@ -18,6 +18,8 @@ from typing import Callable
 
 
 MAX_SEGMENTS = 12
+MAX_CLIP_LABEL_CHARS = 48
+MAX_VIDEO_TEXT_CHARS = 60
 MAX_EXPORT_SECONDS = 600
 ASPECTS = {"16:9": (1280, 720), "9:16": (720, 1280), "1:1": (720, 720)}
 FADES = {"calm": 0.6, "energetic": 0.0, "professional": 0.25}
@@ -261,6 +263,8 @@ def render(
     fit: str,
     style: str,
     progress: Callable[[int, str], None],
+    *,
+    video_text: dict | None = None,
 ) -> dict:
     """Normaliser utdrag, set dei saman, og kontroller den ferdige MP4-fila."""
     if aspect not in ASPECTS or fit not in {"pad", "crop"} or style not in FADES:
@@ -312,7 +316,7 @@ def render(
                     video_filter += f",fade=t=in:st=0:d={fade:.6f},fade=t=out:st={end:.6f}:d={fade:.6f}"
                     audio_filter += f",afade=t=in:st=0:d={fade:.6f},afade=t=out:st={end:.6f}:d={fade:.6f}"
 
-                overlays = presentation.filters(plan, index, width, height, workdir)
+                overlays = presentation.filters(plan, index, width, height, workdir, video_text=video_text)
                 if overlays:
                     video_filter += "," + ",".join(overlays)
 

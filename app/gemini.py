@@ -297,7 +297,8 @@ def editorial_requirements(description: str) -> dict:
             "narration_requested": _narration_requested(description), "title": title}
 
 
-def edit_instruction(description: str, duration_seconds: int, style: str, clip_count: int) -> dict:
+def edit_instruction(description: str, duration_seconds: int, style: str, clip_count: int, *,
+                     clip_labels: bool = False) -> dict:
     requirements = editorial_requirements(description)
     ranking = requirements["ranking_requested"]
     pacing = {
@@ -310,13 +311,14 @@ def edit_instruction(description: str, duration_seconds: int, style: str, clip_c
         "Follow the user's requested purpose, ordering, title and spoken content. Never substitute generic montage choices for explicit requirements.",
         "Choose meaningful moments based on visible content, not upload order or the first seconds by default.",
         "Do not spread time equally by default. Select strong starts and natural endpoints; preserve complete speech/actions where possible.",
+        "Start with a clear visual that fits the requested story. Prefer visually distinct shots with a purpose. Skip dark lead-ins and repeated images when a better moment is available. End on a complete visual beat.",
         pacing,
         "Return ONLY the structured cut plan. No invented clips, URLs or file paths.",
         f"Use between 1 and {media.MAX_SEGMENTS} segments, each at least 1/24 second long.",
         "Use numeric seconds relative to each source. Times must be within its duration; do not repeat overlapping source ranges.",
         "Use unique order values 1..N. order is playback order, not a quality score.",
         "Sum of end_seconds minus start_seconds MUST equal target_duration_seconds within 0.002 seconds.",
-        "Supported rendering: excerpt selection, ordering, fixed output aspect/fit, a short opening title, colorful upper-left ranking scoreboard, and local spoken voiceover when requested. Do not claim to add music, animated scenes, subtitles, sound effects or other unsupported effects.",
+        "Supported rendering: excerpt selection, ordering, fixed output aspect/fit, a short opening title, an upper-left ranking scoreboard, and short excerpt labels or voiceover when requested. Do not claim to add music, animated scenes, subtitles, sound effects or other unsupported effects.",
         "The opening title overlays the start of the first excerpt. Do not add extra time for a title card.",
         "Return presentation with title, ranking_direction and narration matching requirements. Use the exact required title if supplied. Otherwise set title to null unless the user requested an opening title.",
     ]
@@ -342,6 +344,13 @@ def edit_instruction(description: str, duration_seconds: int, style: str, clip_c
         ]
     else:
         rules += ["Set every voiceover to null and presentation.narration to false; no speech was requested."]
+    if clip_labels:
+        rules += [
+            f"Give each excerpt an optional caption of at most {media.MAX_CLIP_LABEL_CHARS} printable characters in the user's language. "
+            "Use two to six words grounded in a visible action or detail. Avoid generic fillers, invented facts and repeated titles.",
+        ]
+    else:
+        rules += ["Set every caption to null unless clip labels were enabled."]
     return {"instruction": description, "target_duration_seconds": duration_seconds,
             "style": style, "video_type": "ranking" if ranking else "montage",
             "requirements": requirements, "rules": rules}
@@ -407,9 +416,10 @@ def _frame_video_parts(clips: list[dict], progress, job_deadline: float | None) 
     deadline = time.monotonic() + RENDER_FRAME_SECONDS
     if job_deadline is not None:
         deadline = min(deadline, job_deadline)
-    by_clip = [[_clip_metadata(clip)] for clip in clips]
+    by_clip = [[] for _ in clips]
     bytes_left = RENDER_FRAME_MAX_BYTES
-    fractions = (0.0, 0.45, 0.8)
+    short_project = len(clips) <= 4 and sum(clip["duration"] for clip in clips) <= INLINE_SOURCE_SECONDS
+    fractions = (0.0, 0.45, 0.8, 0.23, 0.65) if short_project else (0.0, 0.45, 0.8)
     with TemporaryDirectory(prefix="klipp-bilete-") as temporary:
         destination = Path(temporary) / "frame.jpg"
         for pass_index, fraction in enumerate(fractions):
@@ -436,11 +446,16 @@ def _frame_video_parts(clips: list[dict], progress, job_deadline: float | None) 
                         ) from None
                     continue
                 bytes_left -= size
-                by_clip[index].extend([
-                    types.Part.from_text(text=json.dumps({"sample_time_seconds": seconds})),
-                    types.Part.from_bytes(data=data, mime_type="image/jpeg"),
-                ])
-    return [part for parts in by_clip for part in parts]
+                by_clip[index].append((seconds, data))
+    contents = []
+    for clip, samples in zip(clips, by_clip):
+        contents.append(_clip_metadata(clip))
+        for seconds, data in sorted(samples):
+            contents.extend([
+                types.Part.from_text(text=json.dumps({"sample_time_seconds": seconds})),
+                types.Part.from_bytes(data=data, mime_type="image/jpeg"),
+            ])
+    return contents
 
 
 def _inline_video_parts(clips, fps, progress, job_deadline) -> list[types.Part]:
@@ -480,6 +495,7 @@ def generate_plan(
     model: str | None = None,
     deadline: float | None = None,
     use_frames: bool = False,
+    clip_labels: bool = False,
 ) -> list[dict]:
     """Bruk tidsmerkte bilete på Render og video med lyd lokalt."""
     if not 1 <= len(clips) <= MAX_AI_FILES:
@@ -549,7 +565,7 @@ def generate_plan(
                     video_metadata=types.VideoMetadata(fps=fps),
                 ),
             ])
-        instruction = edit_instruction(description, duration_seconds, style, len(clips))
+        instruction = edit_instruction(description, duration_seconds, style, len(clips), clip_labels=clip_labels)
         if use_frames:
             instruction["rules"][0] = (
                 "Analyze the timestamped images from each clip and use the visible content and the user's "
@@ -582,6 +598,7 @@ def generate_plan(
                 require_ranking=requirements["ranking_requested"],
                 ranking_direction=requirements["ranking_direction"] if requirements["ranking_requested"] else None,
                 narration_requested=requirements["narration_requested"], expected_title=requirements["title"],
+                clip_labels=clip_labels,
             )
         except media.MediaError as error:
             # parse_plan gir berre eigne, sanerte meldingar, aldri rå AI-svar.

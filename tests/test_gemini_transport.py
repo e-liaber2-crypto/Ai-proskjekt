@@ -30,8 +30,10 @@ class GeminiTransportTests(unittest.TestCase):
             if len(requests) == 1:
                 return httpx.Response(503, json={"error": {"code": 503, "status": "UNAVAILABLE"}})
             plan = {"segments": [
-                {"clip_id": clip_id, "start_seconds": 0.5, "end_seconds": 1.5, "order": index + 1}
-                for index, clip_id in enumerate(reversed(clip_ids))
+                {"clip_id": clip_ids[1], "start_seconds": 0.5, "end_seconds": 1.5, "order": 1,
+                 "caption": "Raud opning"},
+                {"clip_id": clip_ids[0], "start_seconds": 0.5, "end_seconds": 1.48, "order": 2,
+                 "caption": "Blå avslutning"},
             ]}
             return httpx.Response(200, json={"candidates": [{
                 "content": {"role": "model", "parts": [{"text": json.dumps(plan)}]},
@@ -74,6 +76,8 @@ class GeminiTransportTests(unittest.TestCase):
                 accepted = api.post(project_path + "/jobs", json={
                     "description": "Bruk klippet med raud farge først, og det blå etterpå.",
                     "duration_seconds": 2, "style": "energetic", "mode": "gemini", "ai_consent": True,
+                    "clip_labels": True,
+                    "video_text": {"text": "Sommar på Stord", "timing": "all"},
                 })
                 self.assertEqual(accepted.status_code, 202, accepted.text)
                 job_path = f"/api/jobs/{accepted.json()['id']}"
@@ -87,6 +91,8 @@ class GeminiTransportTests(unittest.TestCase):
                 self.assertIsNone(job["fallback_reason"], job)
                 self.assertEqual([part["clip_id"] for part in job["plan"]], clip_ids[::-1])
                 self.assertEqual([part["start_seconds"] for part in job["plan"]], [0.5, 0.5])
+                self.assertAlmostEqual(job["plan"][-1]["end_seconds"], 1.5)
+                self.assertEqual([part["caption"] for part in job["plan"]], ["Raud opning", "Blå avslutning"])
                 download = api.get(job_path + "/download")
                 self.assertEqual(download.status_code, 200)
                 output = directory / "gemini.mp4"
@@ -98,6 +104,13 @@ class GeminiTransportTests(unittest.TestCase):
                     ], check=True, capture_output=True, timeout=15).stdout
                     self.assertEqual(len(sample), 3)
                     self.assertGreater(sample[channel], 180)
+                for region in ("760:60:260:526", "760:70:260:586"):
+                    text_pixels = subprocess.run([
+                        "ffmpeg", "-v", "error", "-nostdin", "-ss", "0.5", "-i", str(output),
+                        "-frames:v", "1", "-vf", f"crop={region}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+                    ], check=True, capture_output=True, timeout=15).stdout
+                    lit = sum(min(rgb) > 190 for rgb in zip(text_pixels[0::3], text_pixels[1::3], text_pixels[2::3]))
+                    self.assertGreater(lit, 100, f"Tekst manglar i området {region}.")
 
         self.assertEqual([r.url.path for r in requests], [
             f"/v1beta/models/{gemini.DEFAULT_MODEL}:generateContent",
@@ -105,12 +118,13 @@ class GeminiTransportTests(unittest.TestCase):
         ])
         payloads = [json.loads(r.content)["contents"][0]["parts"] for r in requests]
         self.assertEqual(payloads[0], payloads[1])
+        self.assertNotIn("Sommar på Stord", json.dumps(payloads[0], ensure_ascii=False))
         self.assertGreater(requests[0].extensions["timeout"]["read"], 60)
         parts = payloads[0]
         self.assertEqual([json.loads(part["text"])["clip_id"] for part in parts[:-1]
                           if "text" in part and "clip_id" in json.loads(part["text"])], clip_ids)
         blobs = [part["inlineData"] for part in parts if "inlineData" in part]
-        self.assertEqual(len(blobs), 6)
+        self.assertEqual(len(blobs), 10)
         for blob in blobs:
             self.assertEqual(blob.get("mimeType", blob.get("mime_type")), "image/jpeg")
             self.assertTrue(base64.urlsafe_b64decode(blob["data"]).startswith(b"\xff\xd8"))

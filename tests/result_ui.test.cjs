@@ -31,8 +31,18 @@ assert.match(slot.children[0].textContent, /ny video er under behandling.*eldre 
 context.state.latest = old;
 context.updateResult();
 assert.ok(!slot.children.some(item => item.className === 'result-status-notice'));
+context.state.completed = { ...old, id: 'with-cuts', plan: [{
+  clip_id: 'blue', start_seconds: 0.5, end_seconds: 1.5, caption: 'Blå avslutning',
+}] };
+context.state.latest = context.state.completed;
+context.state.project.clips = [{ id: 'blue', original_name: 'bla.mp4' }];
+context.updateResult();
+const cutSummary = slot.children.find(item => item.className === 'cut-summary');
+assert.match(cutSummary.children[0].textContent, /1 utdrag/);
+assert.deepEqual(cutSummary.children[1].children[0].children.map(item => item.textContent),
+  ['bla.mp4', '0.50–1.50 s i kjelda', 'Blå avslutning']);
 context.state.completed = null;
 context.state.latest = { id: 'failed-only', status: 'failed' };
 context.updateResult();
 assert.match(slot.innerHTML, /Ingen ferdig video frå siste forsøk/);
-console.log('Result UI: 4 scenarios passed.');
+console.log('Result UI: 5 scenarios passed.');
