@@ -2,7 +2,7 @@
 
 Ein lokal prototype for eit framtidig abonnementsbasert videoverktøy, laga med ein enkel struktur som passar eit VG2 IT-prosjekt. Du kan opprette prosjekt, laste opp videoklipp, velje innstillingar og eksportere ein ekte MP4-video med FFmpeg. Med ei konfigurert Gemini-kopling kan Google analysere videoane og foreslå kva utdrag som skal brukast, i kva rekkjefølgje.
 
-**Standardoppsettet er ein lokal demonstrasjon utan innlogging.** For ein passordverna lærardemo på Render, sjå [DEPLOY.md](DEPLOY.md). Gratisdemoen har mellombels lagring og støttar ikkje Windows-forteljarstemma. Enkel redigering fungerer utan API-nøkkel; Gemini-analyse er valfri og sender kjeldeklippa til Google. Betaling og automatisk publisering er ikkje aktiverte.
+**Standardoppsettet er ein lokal demonstrasjon utan innlogging.** For ein passordverna lærardemo på Render, sjå [DEPLOY.md](DEPLOY.md). Gratisdemoen har mellombels lagring og støttar ikkje Windows-forteljarstemma. Enkel redigering fungerer utan API-nøkkel. Gemini-analyse er valfri og sender analysemateriale til Google. Betaling og automatisk publisering er ikkje aktiverte.
 
 ## Render og kodekontroll
 
@@ -119,7 +119,7 @@ På Windows kan stiar skrivast med skråstrek, til dømes `C:/Verktoy/ffmpeg/bin
 
 Appen brukar den offisielle Python-pakka `google-genai==2.34.0`. Nøkkelen blir berre brukt på serveren når SDK-klienten blir oppretta; han blir ikkje send til nettlesaren. Integrasjonen vel uttrykkeleg `GEMINI_API_KEY`, slik at ei eventuell anna `GOOGLE_API_KEY` ikkje blir brukt ved eit uhell.
 
-Gemini-analyse kan koste pengar og lastar videoklippa opp til Google. Bruk berre klipp du har rett til å sende dit, og kontroller dei gjeldande vilkåra, prisane og kvotane for kontoen din. Vanleg opplasting til prosjektet er lokal; Google får berre klippa når du uttrykkeleg startar ein AI-jobb og godkjenner sendinga. Samtykke må givast for kvar ny AI-jobb. Å opne nettsida startar ikkje analyse. Undertekstar er framleis ikkje implementerte; ein Gemini-nøkkel aktiverer ikkje transkripsjon eller teksting.
+Gemini-analyse kan bruke kvote eller koste pengar. Google får bilete frå klippa på Render, eller video og lyd ved lokal køyring. Sendinga krev samtykke for kvar AI-jobb. Bruk berre klipp du har rett til å sende dit, og sjekk vilkåra, prisane og kvoten for kontoen din. Undertekstar og transkripsjon er ikkje integrerte.
 
 ## Slik prøver du hovudflyten
 
@@ -141,11 +141,13 @@ Stilen styrer enkle fade-inn- og fade-ut-effektar: roleg brukar inntil 0,6 sekun
 
 ### Korleis Gemini-redigeringa verkar
 
-Ved opptil 60 sekund samla kjeldemateriale lagar bakgrunnsarbeidaren små MP4-kopiar med lyd, og sender dei direkte i analyseførespurnaden. Då treng ikkje appen vente på at Google klargjer kvar fil. Lengre prosjekt og kopiar som ikkje kan lagast innan førebuingsgrensa, brukar Gemini File API. På lengre klipp ber appen om færre bilete per sekund for å avgrense analysearbeidet. Gemini returnerer ein plan med klipp-ID, starttid, sluttid og rekkjefølgje. FFmpeg brukar originalklippa til den ferdige videoen.
+På Render sender appen opptil tre tidsmerkte bilete frå kvart klipp i ei samla analyseførespurnad. Gemini brukar bileta og instruksjonen til å velje utdrag og rekkjefølgje. FFmpeg brukar tidspunkta til å hente dei valde utdraga frå originalklippa, med lyd.
 
-Serveren kontrollerer planen før eksport: klipp-ID-ane må finnast i prosjektet, tider må vere endelege og innanfor kjeldeklippa, og planen må halde seg innanfor ønskte lengde- og ressursgrenser. Modellen kan ikkje sende filstiar eller shell-kommandoar til FFmpeg. Nye jobbar gir AI-stega om lag 45 sekund og går automatisk vidare med enkel klipping ved tidsavbrot eller andre Gemini-feil. Appen merkar reserveeksporten med **Reserve · enkel redigering utan AI**. Han brukar den valde lengda, formatet og stilen. Berre Gemini kan tolke tekstinstruksjonen.
+Ved lokal køyring brukar appen små MP4-kopiar med lyd for opptil 60 sekund samla kjeldemateriale. Lengre prosjekt og kopiar som ikkje kan lagast innan førebuingsgrensa, brukar Gemini File API.
 
-Ved Google-serverfeil blir steget og HTTP-statusen logga med ei fast feilkategori. Ved HTTP 503 under analyse ventar appen og prøver opptil to gonger til med same innhald og modell, så lenge det er tid att. Ventestatus og forsøksnummer blir viste på jobben.
+Serveren kontrollerer klipp-ID, klippepunkt og lengd før eksport. På Render har biletførebuinga eiga tidsgrense, og Gemini får om lag 75 sekund etter at bileta er klare. Lokale AI-jobbar har framleis om lag 45 sekund til AI-stega. Ved Gemini-feil går appen vidare med enkel klipping og merkar eksporten **Reserve · enkel redigering utan AI**.
+
+Ved HTTP 503 under analyse ventar appen og prøver opptil to gonger til med same innhald, så lenge det er tid att. På Render går standardmodellen Gemini 3.8 Flash over til Gemini 3.5 Flash-Lite ved neste forsøk. Ei anna modellinnstilling blir brukt som vald. Ventestatus, modell og forsøksnummer blir viste på jobben.
 
 Når planen er godkjend, lagar FFmpeg den faktiske videofila lokalt. Gemini lagar altså klippeplanen; FFmpeg produserer MP4-fila. Resultatet bør alltid sjåast gjennom før du brukar det vidare, fordi AI kan misforstå innhaldet eller velje dårlege klippepunkt.
 
@@ -155,17 +157,17 @@ Tittelen blir vist over starten av første klipp. Ei farga liste oppe til venstr
 
 For ståande kjeldeklipp kan du velje 9:16 i skjemaet for å unngå store sidekantar. Appen bevarer det valde formatet, sjølv om tekstinstruksjonen nemner eit anna. Nye redigeringsfunksjonar gjeld nye jobbar; ein tidlegare eksport blir ikkje endra automatisk.
 
-Appen kallar SDK-et si filopplasting éin gong per kjeldeklipp. Modellen blir kalla éin gong ved normal drift, og høgst tre gonger i same jobb dersom Google eksplisitt avviser analyse med HTTP 503. Dei to ventetidene er 3 og 8 sekund, med opptil eitt sekund tilfeldig tillegg. Samtykketeksten forklarer desse forsøka og mogleg kvote/kostnad. Kvote-/tilgangsfeil, ugyldige planar, tidsavbrot og transportfeil gir ingen nye automatiske analyseforsøk. Opplasting blir ikkje repetert, modellen blir ikkje bytt, og ein ferdig feila jobb blir ikkje starta på nytt automatisk. Vanlege API-retries er slått av med `HttpRetryOptions(attempts=1)`, og `automatic_continuation=False` hindrar automatisk vidareføring av modellsvaret. Dette betyr ikkje at ei heil fil alltid blir send med berre éin HTTP-førespurnad: SDK-et brukar resumable upload og kan internt prøve ein overføringsdel opptil tre gonger dersom svaret manglar opplastingsstatus. Appen startar ikkje ein ny analyse for å handtere dette.
+Ved bruk av File API kallar appen SDK-et si filopplasting éin gong per kjeldeklipp. SDK-et kan dele opp overføringa. Modellen blir kalla éin gong normalt og opptil tre gonger ved HTTP 503. Ventetidene er 3 og 8 sekund med opptil eitt sekund tilfeldig tillegg. Kvote- og tilgangsfeil, ugyldige planar, tidsavbrot og transportfeil gir ingen nye analyseforsøk. SDK-et sine vanlege automatiske forsøk og vidareføring av svaret er slått av.
 
 Ventinga på kvar Google-fil er avgrensa til maksimalt 30 statusoppslag med to sekund mellom oppslaga. Kvar fil har ei klargjeringsgrense på 120 sekund, og kvart oppslag ventar i høgst ti sekund på svar. Førespurnader under opplasting har ei standardgrense på 120 sekund. Med reserve blir desse grensene korta ned til tida som står att.
 
-Kvart analyseforsøk får tida som står att av budsjettet på 45 sekund. Gemini 3.8 Flash brukar tenkjenivå `low` for lågare ventetid og tokenbruk. Eit tidsavbrot blir ikkje automatisk analysert på nytt. Eventuell filopprydding og sjølve eksporten kjem i tillegg til ventetida for analysen.
+Kvart analyseforsøk får tida som står att av analysebudsjettet. Gemini 3.8 Flash brukar tenkjenivå `low`. Eventuell filopprydding og MP4-eksport kjem i tillegg.
 
 Filreferansane blir lagra før opplasting, slik at appen kan prøve å rydde opp òg om ei opplasting blir avbroten før Google har svart.
 
 File API-filer blir forsøkt sletta etter analysen, òg ved feil. Ved mellombelse slettefeil blir sletting prøvd maksimalt to gonger i same opprydding. Når sletting ikkje kan stadfestast, blir filreferansane bevarte for opprydding ved neste oppstart eller AI-jobb. Google har dessutan ei utløpstid på 48 timar for File API-filer. Direkte analysekopiar opprettar ingen File API-filer.
 
-Ein gammal filreferanse kan gi 403 sjølv om fila aldri vart oppretta, er borte eller høyrer til eit anna Google-prosjekt. Dersom sletting gir 403, og ei fullført filliste for den gjeldande nøkkelen ikkje inneheld referansen, kan nye AI-jobbar halde fram. Appen bevarer referansen og viser ei åtvaring. Mislykka eller ufullstendige fillister, og filer som framleis står i lista, blokkerer vidare AI-analyse. Med reserve kan vanleg klipping fullførast lokalt medan referansane står att til neste opprydding.
+Ein gammal filreferanse kan gi 403 sjølv om fila aldri vart oppretta, er borte eller høyrer til eit anna Google-prosjekt. Dersom ei fullført filliste for den gjeldande nøkkelen ikkje inneheld referansen, kan nye jobbar bruke File API. Appen bevarer referansen og viser ei åtvaring. Uavklarte filer blokkerer vidare bruk av File API. På Render kan bileteanalysen halde fram medan gamle referansar ventar på opprydding.
 
 Instruksjonen og modellnamnet blir lagra saman med kvar jobb når han blir oppretta. Den validerte klippeplanen blir òg lagra, med klipp-ID-ar, start- og sluttider og rekkjefølgje. Seinare endringar i prosjektinnstillingar eller `GEMINI_MODEL` endrar dermed ikkje kva ein allereie oppretta jobb skulle bruke.
 

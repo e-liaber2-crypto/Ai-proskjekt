@@ -2,20 +2,119 @@
 
 import base64
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
+import time
 import unittest
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
 from google import genai
 import httpx
 
 from app import gemini, media
+from app.main import create_app
 
 
 class GeminiTransportTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg må vere installert")
+    def test_render_retries_with_flash_lite_and_exports_geminis_cut_order(self):
+        requests = []
+        clip_ids = []
+
+        def transport(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(503, json={"error": {"code": 503, "status": "UNAVAILABLE"}})
+            plan = {"segments": [
+                {"clip_id": clip_id, "start_seconds": 0.5, "end_seconds": 1.5, "order": index + 1}
+                for index, clip_id in enumerate(reversed(clip_ids))
+            ]}
+            return httpx.Response(200, json={"candidates": [{
+                "content": {"role": "model", "parts": [{"text": json.dumps(plan)}]},
+                "finishReason": "STOP",
+            }]})
+
+        render_env = {
+            "RENDER": "true", "RENDER_EXTERNAL_HOSTNAME": "demo.onrender.com", "PUBLIC_HOST": "",
+            "DEMO_PASSWORD": "test-password-for-render", "FFMPEG_THREADS": "1",
+            "GEMINI_API_KEY": "offline-test-key", "GEMINI_MODEL": gemini.DEFAULT_MODEL,
+        }
+        with TemporaryDirectory() as temporary, patch.dict(os.environ, render_env):
+            directory = Path(temporary)
+            options = gemini._http_options()
+            options.httpx_client = httpx.Client(transport=httpx.MockTransport(transport), trust_env=False)
+            options.async_client_args = {"trust_env": False}
+            client = genai.Client(api_key="offline-test-key", vertexai=False, http_options=options)
+            with patch("app.gemini._client", return_value=client), patch(
+                "app.gemini.ANALYSIS_RETRY_DELAYS", (0, 0),
+            ), patch("app.gemini.uniform", return_value=0), TestClient(
+                create_app(data_dir=directory / "data"), base_url="https://demo.onrender.com",
+            ) as api:
+                api.auth = ("laerar", "test-password-for-render")
+                self.assertEqual(api.get("/api/config").json()["gemini_input"], "frames")
+                project = api.post("/api/projects", json={"name": "To klipp på Render"})
+                self.assertEqual(project.status_code, 201, project.text)
+                project_path = f"/api/projects/{project.json()['id']}"
+                for color in ("blue", "red"):
+                    source = directory / f"{color}.mp4"
+                    subprocess.run([
+                        "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+                        f"color=c={color}:s=160x90:r=24:d=2",
+                        "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", str(source),
+                    ], check=True, capture_output=True, timeout=30)
+                    with source.open("rb") as file:
+                        uploaded = api.post(project_path + "/clips", files={"file": (source.name, file, "video/mp4")})
+                    self.assertEqual(uploaded.status_code, 201, uploaded.text)
+                    clip_ids.append(uploaded.json()["id"])
+
+                accepted = api.post(project_path + "/jobs", json={
+                    "description": "Bruk klippet med raud farge først, og det blå etterpå.",
+                    "duration_seconds": 2, "style": "energetic", "mode": "gemini", "ai_consent": True,
+                })
+                self.assertEqual(accepted.status_code, 202, accepted.text)
+                job_path = f"/api/jobs/{accepted.json()['id']}"
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    job = api.get(job_path).json()
+                    if job["status"] in ("completed", "failed"):
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(job["status"], "completed", job)
+                self.assertIsNone(job["fallback_reason"], job)
+                self.assertEqual([part["clip_id"] for part in job["plan"]], clip_ids[::-1])
+                self.assertEqual([part["start_seconds"] for part in job["plan"]], [0.5, 0.5])
+                download = api.get(job_path + "/download")
+                self.assertEqual(download.status_code, 200)
+                output = directory / "gemini.mp4"
+                output.write_bytes(download.content)
+                for seconds, channel in [("0.5", 0), ("1.5", 2)]:
+                    sample = subprocess.run([
+                        "ffmpeg", "-v", "error", "-nostdin", "-ss", seconds, "-i", str(output),
+                        "-frames:v", "1", "-vf", "scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+                    ], check=True, capture_output=True, timeout=15).stdout
+                    self.assertEqual(len(sample), 3)
+                    self.assertGreater(sample[channel], 180)
+
+        self.assertEqual([r.url.path for r in requests], [
+            f"/v1beta/models/{gemini.DEFAULT_MODEL}:generateContent",
+            f"/v1beta/models/{gemini.RENDER_RESERVE_MODEL}:generateContent",
+        ])
+        payloads = [json.loads(r.content)["contents"][0]["parts"] for r in requests]
+        self.assertEqual(payloads[0], payloads[1])
+        self.assertGreater(requests[0].extensions["timeout"]["read"], 60)
+        parts = payloads[0]
+        self.assertEqual([json.loads(part["text"])["clip_id"] for part in parts[:-1]
+                          if "text" in part and "clip_id" in json.loads(part["text"])], clip_ids)
+        blobs = [part["inlineData"] for part in parts if "inlineData" in part]
+        self.assertEqual(len(blobs), 6)
+        for blob in blobs:
+            self.assertEqual(blob.get("mimeType", blob.get("mime_type")), "image/jpeg")
+            self.assertTrue(base64.urlsafe_b64decode(blob["data"]).startswith(b"\xff\xd8"))
+
     def test_real_sdk_serializes_upload_analysis_and_cleanup_without_network(self):
         requests = []
         analysis_options = []
