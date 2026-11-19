@@ -289,7 +289,6 @@ async function editor(id, token) {
           <div class="info-box warning settings-note">Gemini får video og lyd frå alle klippa, saman med instruksjonen. For korte prosjekt sender appen mindre analysekopiar når det er mogleg. Eksporten brukar originalklippa. Ved overbelasting (HTTP 503) kan analysen bli prøvd opptil tre gonger. Sjå gjennom den ferdige videoen.</div>
           <p id="gemini-availability" class="field-hint"></p><p id="gemini-file-limit" class="field-hint"></p><p id="gemini-validation" class="field-hint" role="status" aria-live="polite"></p>
           <label class="check-field ai-consent-field"><input id="ai-consent" type="checkbox" data-lock><span>Eg samtykkjer til å sende klippa eller analysekopiar og instruksjonen til Google for denne eksporten, med opptil tre forsøk ved overbelasting. Dette kan bruke kvote eller koste pengar.</span></label>
-          <label class="check-field ai-consent-field"><input id="ai-fallback" type="checkbox" aria-describedby="ai-fallback-hint" data-lock><span>Fullfør med enkel redigering om Gemini feilar</span></label>
           <p id="ai-fallback-hint" class="field-hint"></p>
         </div>
         <div class="field"><label id="description-label" for="description">Kva vil du lage?</label><textarea id="description" name="description" maxlength="3000" placeholder="Skildre tema, stemning og kva du vil fortelje …" aria-describedby="description-hint" data-lock></textarea><span id="description-hint" class="field-hint"></span></div>
@@ -306,26 +305,21 @@ async function editor(id, token) {
   const settings = project.settings || {};
   byId("description").value = project.description || "";
   const seconds = Number(settings.duration_seconds) || 30;
-  byId("duration-minutes").value = Math.floor(seconds / 60);
-  byId("duration-seconds").value = seconds % 60;
-  state.durationPreset = seconds <= 30 ? "30" : seconds === 180 ? "180" : null;
+  setRequestedDuration(seconds);
+  state.durationPreset = seconds === 30 ? "30" : seconds === 180 ? "180" : null;
   byId("aspect").value = settings.aspect || "16:9";
   byId("fit").value = settings.fit || "pad";
   byId("style").value = settings.style || "professional";
   byId("edit-mode").value = settings.mode === "gemini" ? "gemini" : "basic";
   // Gamalt samtykke frå ei lagra jobb er aldri samtykke til ein ny eksport.
   byId("ai-consent").checked = false;
-  byId("ai-fallback").checked = settings.basic_fallback === true;
   byId("edit-mode").addEventListener("change", () => {
     byId("ai-consent").checked = false;
     updateControls();
   });
   document.querySelectorAll("[data-duration]").forEach((button) => {
     button.addEventListener("click", () => {
-      const seconds = Math.min(Number(button.dataset.duration), Math.max(1, Math.floor(state.project.source_duration || 0)));
       state.durationPreset = button.dataset.duration;
-      byId("duration-minutes").value = Math.floor(seconds / 60);
-      byId("duration-seconds").value = seconds % 60;
       updateControls();
     });
   });
@@ -370,8 +364,6 @@ async function editor(id, token) {
       mode: byId("edit-mode").value,
       ai_consent:
         byId("edit-mode").value === "gemini" && byId("ai-consent").checked,
-      basic_fallback:
-        byId("edit-mode").value === "gemini" && byId("ai-fallback").checked,
     };
     if (state.uploading || state.submitting || active(state.latest)) return;
     const modeError = editingModeError();
@@ -411,6 +403,10 @@ async function editor(id, token) {
   if (active(state.latest)) beginPolling(token);
 }
 
+function setRequestedDuration(seconds) {
+  byId("duration-minutes").value = Math.floor(seconds / 60);
+  byId("duration-seconds").value = seconds % 60;
+}
 function requestedDuration() {
   return (
     Number(byId("duration-minutes")?.value || 0) * 60 +
@@ -452,10 +448,9 @@ function updateEditingMode(locked) {
   byId("gemini-validation").textContent = locked ? "" : editingModeError();
   byId("ai-consent").required = gemini;
   byId("ai-consent").disabled = locked || !gemini || !state.config?.ai_available;
-  byId("ai-fallback").disabled = locked || !gemini;
-  const reserveWait = state.config?.gemini_reserve_wait_seconds || 90;
+  const reserveWait = state.config?.gemini_reserve_wait_seconds || 45;
   byId("ai-fallback-hint").textContent =
-    `Gje AI-stega opptil om lag ${duration(reserveWait)}. Ved feil brukar appen enkel klipping med vald lengd, format og stil. Instruksjonen blir berre brukt ved AI-redigering.`;
+    `Om Gemini feilar eller brukar meir enn om lag ${duration(reserveWait)}, held appen fram med enkel klipping i vald lengd, format og stil. Instruksjonen blir berre brukt ved AI-redigering.`;
   byId("description").required = gemini;
   byId("description-label").textContent = gemini
     ? "Kva skal Gemini lage? (påkravd)"
@@ -474,8 +469,11 @@ function updateControls() {
     button.disabled = locked;
   });
   updateEditingMode(locked);
-  const requested = requestedDuration();
   const source = Number(state.project.source_duration) || 0;
+  if (state.durationPreset && state.project.clips.length) {
+    setRequestedDuration(Math.min(Number(state.durationPreset), Math.max(1, Math.floor(source))));
+  }
+  const requested = requestedDuration();
   const max = state.config?.limits?.max_export_seconds || 600;
   document.querySelectorAll("[data-duration]").forEach((button) => {
     button.disabled = locked || !state.project.clips.length;
@@ -621,7 +619,7 @@ function updateJob() {
   if (active(job) && jobMode(job) === "gemini") {
     const elapsed = Math.max(0, (Date.now() - new Date(job.created_at).getTime()) / 1000);
     const wait = job.settings?.basic_fallback
-      ? `Med reserve får AI-stega om lag ${duration(state.config?.gemini_reserve_wait_seconds || 90)}.`
+      ? `AI-stega får om lag ${duration(state.config?.gemini_reserve_wait_seconds || 45)} før appen går vidare ved tidsavbrot.`
       : `Eitt analyseforsøk har ei tidsgrense på ${duration(state.config?.analysis_timeout_seconds || 180)}.`;
     box.append(element("p", "field-hint",
       `Jobben har gått i ${duration(elapsed)}. ${wait}`));

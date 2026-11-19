@@ -747,7 +747,7 @@ class GeminiApiTests(NoNetworkCase):
             self.assertNotIn(TEST_KEY, json.dumps(restored_first))
         self.client_constructor.assert_not_called()
 
-    def test_provider_failure_persists_without_basic_fallback_or_automatic_retry(self):
+    def test_quota_error_falls_back_without_retry_or_leaking_provider_details(self):
         self.fake.models.error = errors.ClientError(429, {"error": {
             "message": PROVIDER_PRIVATE_TEXT + TEST_KEY, "status": "RESOURCE_EXHAUSTED",
         }})
@@ -755,10 +755,11 @@ class GeminiApiTests(NoNetworkCase):
             response = self.submit()
             self.assertIn(response.status_code, (200, 201, 202), response.text)
             job = self.await_job(response.json()["id"])
-        self.assertEqual(job["status"], "failed", job)
+        self.assertEqual(job["status"], "completed", job)
         self.assertEqual(job["settings"]["mode"], "gemini")
-        self.assertTrue(job["error"])
-        self.assertIn(self.api.get(f"/api/jobs/{job['id']}/download").status_code, (404, 409))
+        self.assertEqual(job["fallback_reason"], "quota")
+        self.assertIsNone(job["error"])
+        self.assertEqual(self.api.get(f"/api/jobs/{job['id']}/download").status_code, 200)
         for private in (TEST_KEY, PROVIDER_PRIVATE_TEXT):
             self.assertNotIn(private, json.dumps(job))
             self.assertNotIn(private, logs.getvalue())
@@ -768,14 +769,27 @@ class GeminiApiTests(NoNetworkCase):
         self.close_api()
         self.open_api()
         restored = self.api.get(f"/api/jobs/{job['id']}").json()
-        self.assertEqual(restored["status"], "failed")
-        self.assertEqual(restored["error"], job["error"])
+        self.assertEqual(restored["status"], "completed")
+        self.assertEqual(restored["fallback_reason"], "quota")
         self.assertEqual(len(self.fake.models.calls), 1, "Omstart skal ikkje prøve ein betalt analyse på nytt")
 
-    def test_short_job_with_reserve_exports_mp4_after_google_times_out(self):
+    def test_two_uploaded_clips_export_after_a_google_timeout_even_from_an_old_editor(self):
+        first_id = self.api.get(f"/api/projects/{self.project_id}").json()["clips"][0]["id"]
+        second = self.directory / "andre.mp4"
+        subprocess.run([
+            "ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+            "color=c=red:s=160x90:r=24:d=1", "-c:v", "libx264", "-threads", "1",
+            "-pix_fmt", "yuv420p", str(second),
+        ], check=True, capture_output=True, timeout=30)
+        with second.open("rb") as clip:
+            response = self.api.post(f"/api/projects/{self.project_id}/clips",
+                                     files={"file": (second.name, clip, "video/mp4")})
+        self.assertEqual(response.status_code, 201, response.text)
+        second_id = response.json()["id"]
+
         self.fake.models.error = httpx.ReadTimeout(PROVIDER_PRIVATE_TEXT)
         with patch("app.gemini.INLINE_SOURCE_SECONDS", 60):
-            response = self.submit(basic_fallback=True)
+            response = self.submit(duration_seconds=2, basic_fallback=False)
             self.assertEqual(response.status_code, 202, response.text)
             job = self.await_job(response.json()["id"])
 
@@ -787,12 +801,20 @@ class GeminiApiTests(NoNetworkCase):
         self.assertLessEqual(self.fake.models.calls[0]["config"].http_options.timeout, gemini.RESERVE_WAIT_SECONDS * 1000)
         self.assertFalse(self.fake.files.uploads)
         self.assertFalse(self.fake.files.deletes)
-        clip_id = self.api.app.state.store.source_clips(self.project_id)[0]["id"]
-        self.assertEqual(job["plan"], [{"clip_id": clip_id, "start_seconds": 0, "end_seconds": 1, "order": 1}])
+        self.assertEqual([part["clip_id"] for part in job["plan"]], [first_id, second_id])
         download = self.api.get(f"/api/jobs/{job['id']}/download")
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download.headers["content-type"], "video/mp4")
-        self.assertEqual(download.content[4:8], b"ftyp")
+        exported = self.directory / "reserve.mp4"
+        exported.write_bytes(download.content)
+        self.assertAlmostEqual(media.probe(exported)["duration"], 2, delta=0.15)
+        for timestamp, color_channel in [("0.5", 2), ("1.5", 0)]:
+            rgb = subprocess.run([
+                "ffmpeg", "-v", "error", "-nostdin", "-ss", timestamp, "-i", str(exported),
+                "-frames:v", "1", "-vf", "scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+            ], check=True, capture_output=True, timeout=15).stdout
+            self.assertEqual(len(rgb), 3)
+            self.assertGreater(rgb[color_channel], 180, "Både det blå og det raude klippet skal vere med.")
         project = self.api.get(f"/api/projects/{self.project_id}").json()
         self.assertEqual(project["latest_job"]["fallback_reason"], "timeout")
 
@@ -802,7 +824,8 @@ class GeminiApiTests(NoNetworkCase):
         response = self.submit()
         self.assertIn(response.status_code, (200, 201, 202), response.text)
         job = self.await_job(response.json()["id"])
-        self.assertEqual(job["status"], "failed", job)
+        self.assertEqual(job["status"], "completed", job)
+        self.assertEqual(job["fallback_reason"], "cleanup")
         self.close_api()
 
         def remote_names():
@@ -824,7 +847,7 @@ class GeminiApiTests(NoNetworkCase):
         self.assertEqual(len(self.fake.files.uploads), 1)
         self.assertEqual(len(self.fake.models.calls), 1)
         self.assertEqual(self.fake.files.deletes, reserved + reserved)
-        self.assertEqual(self.api.get(f"/api/jobs/{job['id']}").json()["status"], "failed")
+        self.assertEqual(self.api.get(f"/api/jobs/{job['id']}").json()["status"], "completed")
 
 
 if __name__ == "__main__":

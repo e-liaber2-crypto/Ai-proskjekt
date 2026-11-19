@@ -495,7 +495,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except media.MediaError as error:
                 raise HTTPException(400, str(error)) from error
             identifier = uuid4().hex
-            settings = body.model_dump(exclude={"description"})
+            settings = body.model_dump(exclude={"description", "basic_fallback"})
+            # Nye Gemini-jobbar brukar reserve, også frå ein eldre nettlesarfane.
+            settings["basic_fallback"] = body.mode == "gemini"
             job_settings = {**settings, "description": body.description}
             if body.mode == "gemini":
                 job_settings["gemini_model"] = gemini.model_name()
@@ -580,7 +582,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     # Berre desse tre filene er offentlege. data/, .env og Python-kode blir aldri servert.
     @application.get("/")
     def home():
-        return FileResponse(ROOT / "index.html", media_type="text/html")
+        return FileResponse(ROOT / "index.html", media_type="text/html", headers={"Cache-Control": "no-cache"})
 
     @application.get("/styles.css")
     def stylesheet():
@@ -588,7 +590,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @application.get("/app.js")
     def javascript():
-        return FileResponse(ROOT / "app.js", media_type="text/javascript")
+        return FileResponse(ROOT / "app.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
     @application.get("/favicon.ico", include_in_schema=False)
     def favicon():
